@@ -1,4 +1,8 @@
-# v-observe
+# @ozjsey/v-observe
+
+## Playground
+
+Try the live examples in the [npm portfolio playground](https://github.com/ozJSey/npm-portfolio-playground).
 
 Vue 3 directive owning **`IntersectionObserver`** + **`ResizeObserver`** + **`MutationObserver`** in one binding — with scroll-direction inference, per-threshold `crossed` events, breakpoint brackets, orientation crossings, child / attribute / text mutation diffs, self-removal detection, and a unified **`data-observe-state`** CSS hook.
 
@@ -11,14 +15,14 @@ Vue 3 directive owning **`IntersectionObserver`** + **`ResizeObserver`** + **`Mu
 ## Install
 
 ```bash
-npm install v-observe
+npm install @ozjsey/v-observe
 ```
 
 ## Quick start — plugin install (recommended)
 
 ```ts
 import { createApp } from 'vue'
-import { ObservePlugin } from 'v-observe'
+import { ObservePlugin } from '@ozjsey/v-observe'
 import App from './App.vue'
 
 createApp(App).use(ObservePlugin).mount('#app')
@@ -30,7 +34,7 @@ Registers the directive under `observe`, so templates use `v-observe="..."`.
 
 ```ts
 import { createApp } from 'vue'
-import { vObserve } from 'v-observe'
+import { vObserve } from '@ozjsey/v-observe'
 
 createApp(App).directive('observe', vObserve).mount('#app')
 ```
@@ -64,7 +68,7 @@ const loaded = ref(false)
 
 ```vue
 <script setup lang="ts">
-import type { IntersectCrossEvent } from 'v-observe'
+import type { IntersectCrossEvent } from '@ozjsey/v-observe'
 
 function onCross(e: IntersectCrossEvent) {
   if (e.threshold >= 0.8 && e.direction === 'up') loadNextPage()
@@ -83,7 +87,7 @@ function onCross(e: IntersectCrossEvent) {
 
 ```vue
 <script setup lang="ts">
-import type { IntersectEvent } from 'v-observe'
+import type { IntersectEvent } from '@ozjsey/v-observe'
 
 function track(e: IntersectEvent) {
   if (e.isIntersecting && e.ratio >= 0.5) analytics.fire('impression', { id: card.id })
@@ -99,7 +103,7 @@ function track(e: IntersectEvent) {
 
 ```vue
 <script setup lang="ts">
-import type { IntersectEvent } from 'v-observe'
+import type { IntersectEvent } from '@ozjsey/v-observe'
 const cssDir = ref<'from-below' | 'from-above' | null>(null)
 
 function onIntersect(e: IntersectEvent) {
@@ -155,7 +159,7 @@ const scroller = ref<HTMLElement | null>(null)
 
 ```vue
 <script setup lang="ts">
-import type { ResizeEvent } from 'v-observe'
+import type { ResizeEvent } from '@ozjsey/v-observe'
 const size = ref<{ width: number; height: number }>({ width: 0, height: 0 })
 
 function onResize(e: ResizeEvent) {
@@ -174,7 +178,7 @@ Default mode is `'tick'`. The first tick has `from: null` and `delta: { width: 0
 
 ```vue
 <script setup lang="ts">
-import type { ResizeEvent } from 'v-observe'
+import type { ResizeEvent } from '@ozjsey/v-observe'
 const bracket = ref<string>('xs')
 
 function onResize(e: ResizeEvent) {
@@ -209,7 +213,7 @@ Object form: keys label brackets, smallest key with value `0` labels the `[0, n)
 
 ```vue
 <script setup lang="ts">
-import type { ResizeEvent } from 'v-observe'
+import type { ResizeEvent } from '@ozjsey/v-observe'
 
 function onCross(e: ResizeEvent) {
   if (e.mode === 'crossed') {
@@ -238,7 +242,7 @@ function onCross(e: ResizeEvent) {
 
 ```vue
 <script setup lang="ts">
-import type { ResizeEvent } from 'v-observe'
+import type { ResizeEvent } from '@ozjsey/v-observe'
 
 function onFlip(e: ResizeEvent) {
   if (e.mode === 'orientation') {
@@ -262,7 +266,7 @@ function onFlip(e: ResizeEvent) {
 
 ```vue
 <script setup lang="ts">
-import type { ResizeEvent } from 'v-observe'
+import type { ResizeEvent } from '@ozjsey/v-observe'
 const canvas = ref<HTMLCanvasElement | null>(null)
 
 function onResize(e: ResizeEvent) {
@@ -299,7 +303,7 @@ function onResize(e: ResizeEvent) {
 
 ```vue
 <script setup lang="ts">
-import type { MutateEvent } from 'v-observe'
+import type { MutateEvent } from '@ozjsey/v-observe'
 
 function onTheme(e: MutateEvent) {
   if (e.type === 'attr:class') syncTheme(e.to)
@@ -315,7 +319,7 @@ function onTheme(e: MutateEvent) {
 
 ```vue
 <script setup lang="ts">
-import type { MutateEvent } from 'v-observe'
+import type { MutateEvent } from '@ozjsey/v-observe'
 
 function onAdd(e: MutateEvent) {
   if (e.type === 'children:added' && e.added) {
@@ -341,7 +345,7 @@ function onAdd(e: MutateEvent) {
 
 ```vue
 <script setup lang="ts">
-import type { MutateEvent } from 'v-observe'
+import type { MutateEvent } from '@ozjsey/v-observe'
 
 function onEdit(e: MutateEvent) {
   if (e.type === 'text') validate(e.to)
@@ -364,7 +368,7 @@ Text mode subscribes with `subtree: true` so deep text-node edits fire too. Mult
 
 ```vue
 <script setup lang="ts">
-import type { MutateEvent } from 'v-observe'
+import type { MutateEvent } from '@ozjsey/v-observe'
 
 function onRemoved(e: MutateEvent) {
   if (e.type === 'removed') tearDownChartInstance()
@@ -420,7 +424,7 @@ import type {
   ResizeOrientation, ResizeBox, ResizeMode, ResizeDimensions,
   MutateConfig, MutateEvent, MutateEventType,
   ObserveStateAttribute,
-} from 'v-observe'
+} from '@ozjsey/v-observe'
 
 type ObserveOptions = {
   intersect?: IntersectConfig
