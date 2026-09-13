@@ -1,5 +1,7 @@
 # @ozjsey/v-observe
 
+See in action: [npm portfolio playground](https://ozjsey.github.io/npm-portfolio-playground/#v-observe).
+
 ## Playground
 
 Try the live examples in the [npm portfolio playground](https://github.com/ozJSey/npm-portfolio-playground).
