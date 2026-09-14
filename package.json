@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ozJSey/vue-observe.git"
+    "url": "git+https://github.com/ozjsey/v-observe.git"
   },
-  "homepage": "https://github.com/ozJSey/vue-observe#readme",
+  "homepage": "https://github.com/ozjsey/v-observe#readme",
   "bugs": {
-    "url": "https://github.com/ozJSey/vue-observe/issues"
+    "url": "https://github.com/ozjsey/v-observe/issues"
   },
   "type": "module",
   "main": "dist/vObserve.min.cjs",
