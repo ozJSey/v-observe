@@ -11,9 +11,9 @@
     "declarationMap": true,
     "sourceMap": true,
     "outDir": "dist",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["vitest/globals"]
   },
-  "include": ["vObserve.ts"],
+  "include": ["vObserve.ts", "vObserve.test.ts", "src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

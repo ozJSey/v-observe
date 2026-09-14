@@ -2,6 +2,11 @@
  * Mutate mode, stateful half — observer attachment (host + parent for
  * self-removal), debounce-window event merging, dispatch, the
  * `mutate:active` cooldown, and setup / rebuild / teardown.
+ *
+ * The host's `textContent` as of the last dispatch lives here (`lastText`)
+ * rather than in the record translator, because a `text` event is a diff of
+ * the WHOLE host across a flush — not of whichever text node the browser
+ * happened to report last.
  */
 import { isGated } from './gate'
 import {
@@ -14,7 +19,7 @@ import {
 } from './mutate-records'
 import { getOrCreate, stateMap, type MutateInternal, type ObserveState } from './state'
 import { writeStateAttribute } from './state-attribute'
-import type { MutateConfig, MutateEvent, ObserveOptions } from './types'
+import type { MutateConfig, MutateEvent } from './types'
 
 const MUTATE_ACTIVE_COOLDOWN_MS = 150
 
@@ -41,7 +46,7 @@ function dispatchMutateEvents(
       const flushable = Array.from(internal.pending.values())
       internal.pending.clear()
       flushMutateEvents(el, state, internal, flushable)
-    }, debounce) as unknown as number
+    }, debounce)
     return
   }
   flushMutateEvents(el, state, internal, events)
@@ -57,18 +62,16 @@ function flushMutateEvents(
   if (handler) {
     for (const ev of events) handler(ev)
   }
-  state.segments.mutate = 'active'
-  writeStateAttribute(el, state.segments)
+  internal.segment = 'active'
+  writeStateAttribute(el, state)
   if (internal.activeTimer !== null) clearTimeout(internal.activeTimer)
   internal.activeTimer = setTimeout(() => {
     internal.activeTimer = null
-    // Only revert to 'idle' if we still have a live mutate segment (not torn down).
-    const live = stateMap.get(el)
-    if (live && live.segments.mutate === 'active') {
-      live.segments.mutate = 'idle'
-      writeStateAttribute(el, live.segments)
-    }
-  }, MUTATE_ACTIVE_COOLDOWN_MS) as unknown as number
+    // Only revert to 'idle' if this internal is still the live one.
+    if (stateMap.get(el)?.mutate !== internal) return
+    internal.segment = 'idle'
+    writeStateAttribute(el, state)
+  }, MUTATE_ACTIVE_COOLDOWN_MS)
 }
 
 function handleSelfRemoval(
@@ -111,7 +114,10 @@ function attachMutateObservers(
       // while intersect is hidden. `removed` flows through the parent
       // observer and stays terminal-by-default (see handleSelfRemoval).
       if (isGated(state, internal.cfg)) return
-      const events = recordsToEvents(el, records, internal.normalized)
+      const events = recordsToEvents(el, records, internal.normalized, internal.lastText)
+      // Baseline moves whether or not a `text` event was emitted: the next
+      // diff has to start from what the host says now.
+      internal.lastText = el.textContent
       dispatchMutateEvents(el, state, internal, events)
     })
     observer.observe(el, init)
@@ -130,23 +136,24 @@ function attachMutateObservers(
   }
 }
 
-export function setupMutate(el: HTMLElement, cfg: MutateConfig, opts: ObserveOptions): void {
+export function setupMutate(el: HTMLElement, cfg: MutateConfig, state?: ObserveState): void {
   if (typeof MutationObserver === 'undefined') return
-  const state = getOrCreate(el, opts)
+  const s = state ?? getOrCreate(el)
   const normalized = normalizeMutate(cfg)
   const initKey = buildMutateInitKey(normalized)
 
-  if (state.mutate) {
-    state.mutate.cfg = cfg
-    state.mutate.normalized = normalized
-    if (state.mutate.initKey !== initKey) {
+  const existing = s.mutate
+  if (existing) {
+    existing.cfg = cfg
+    existing.normalized = normalized
+    if (existing.initKey !== initKey) {
       // Init shape changed — rebuild observers.
-      if (state.mutate.observer) state.mutate.observer.disconnect()
-      if (state.mutate.parentObserver) state.mutate.parentObserver.disconnect()
-      state.mutate.observer = null
-      state.mutate.parentObserver = null
-      state.mutate.initKey = initKey
-      attachMutateObservers(el, state, state.mutate)
+      if (existing.observer) existing.observer.disconnect()
+      if (existing.parentObserver) existing.parentObserver.disconnect()
+      existing.observer = null
+      existing.parentObserver = null
+      existing.initKey = initKey
+      attachMutateObservers(el, s, existing)
     }
     return
   }
@@ -157,14 +164,27 @@ export function setupMutate(el: HTMLElement, cfg: MutateConfig, opts: ObserveOpt
     observer: null,
     parentObserver: null,
     initKey,
+    segment: 'idle',
+    lastText: el.textContent,
     pending: new Map(),
     timer: null,
     activeTimer: null,
+    resetGateBaseline: () => {
+      if (!internal.cfg.gateOnIntersect) return
+      if (internal.timer !== null) {
+        clearTimeout(internal.timer)
+        internal.timer = null
+      }
+      internal.pending.clear()
+      // Mutations that happened while hidden were dropped, so the text the
+      // host shows now is the new baseline — not the one from before it went
+      // off-screen, which would make the first post-restore `text` event a
+      // diff across the whole hidden period.
+      internal.lastText = el.textContent
+    },
   }
-  state.mutate = internal
-  state.segments.mutate = 'idle'
-  writeStateAttribute(el, state.segments)
-  attachMutateObservers(el, state, internal)
+  s.mutate = internal
+  attachMutateObservers(el, s, internal)
 }
 
 export function teardownMutate(el: HTMLElement): void {

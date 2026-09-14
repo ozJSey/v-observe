@@ -110,17 +110,30 @@ interface MockedRO {
 const roInstances: MockedRO[] = []
 const roByElement = new Map<Element, MockedRO[]>()
 
+/**
+ * `observe(el, options)` — the second argument is the whole point of `box`,
+ * and the previous mock's `observe(el)` signature is why the suite could not
+ * see that the real call never passed one. `observeCalls` is the log; a mock
+ * that accepts an argument it never records is the same blind spot again.
+ */
 class MockResizeObserver {
   callback: ResizeObserverCallback
   observed = new Set<Element>()
+  observeCalls: { el: Element; options: ResizeObserverOptions | undefined }[] = []
   disconnected = false
+  /** Engines without `device-pixel-content-box` reject it rather than ignore it. */
+  static rejectBoxes = new Set<string>()
 
   constructor(cb: ResizeObserverCallback) {
     this.callback = cb
     roInstances.push(this)
   }
 
-  observe(el: Element): void {
+  observe(el: Element, options?: ResizeObserverOptions): void {
+    if (options?.box && MockResizeObserver.rejectBoxes.has(options.box)) {
+      throw new TypeError(`Failed to execute 'observe' on 'ResizeObserver': unsupported box ${options.box}`)
+    }
+    this.observeCalls.push({ el, options })
     this.observed.add(el)
     const list = roByElement.get(el) ?? []
     list.push(this)
@@ -152,6 +165,7 @@ class MockResizeObserver {
 function installROMock(): void {
   roInstances.length = 0
   roByElement.clear()
+  MockResizeObserver.rejectBoxes.clear()
   ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
     MockResizeObserver as unknown as typeof ResizeObserver
 }
@@ -173,6 +187,13 @@ function makeBoxSize(w: number, h: number): readonly ResizeObserverSize[] {
   return [{ inlineSize: w, blockSize: h } as ResizeObserverSize]
 }
 
+/** Every `observe()` the directive made for this element, newest last. */
+function observeCallsFor(el: Element): { el: Element; options: ResizeObserverOptions | undefined }[] {
+  const list = roByElement.get(el)
+  if (!list || list.length === 0) throw new Error('No ResizeObserver attached to element')
+  return (list[0] as unknown as MockResizeObserver).observeCalls
+}
+
 function fireResize(el: Element, opts: FireResizeOpts, observerIndex = 0): void {
   const list = roByElement.get(el)
   if (!list || list.length === 0) throw new Error('No ResizeObserver attached to element')
@@ -192,7 +213,15 @@ function fireResize(el: Element, opts: FireResizeOpts, observerIndex = 0): void 
 
 /* ------------------------------------------------------------------ */
 /*  MutationObserver mock — drives entries synchronously                */
+/*                                                                      */
+/*  Captured BEFORE the mock replaces it: every MutationObserver in the  */
+/*  suite is fired by hand and never observes a real DOM write, which is  */
+/*  how the suite certified the exact configuration that froze a real     */
+/*  browser. The "against a real MutationObserver" block at the end of    */
+/*  this file puts jsdom's own implementation back and writes to the DOM. */
 /* ------------------------------------------------------------------ */
+
+const RealMutationObserver = globalThis.MutationObserver
 
 interface MockedMO {
   readonly callback: MutationCallback
@@ -441,10 +470,10 @@ describe('public API', () => {
         directives[name] = dir
         return stubApp
       },
-    } as unknown as Parameters<typeof ObservePlugin.install>[0]
-    if (typeof ObservePlugin.install === 'function') {
-      ObservePlugin.install(stubApp)
-    }
+    } as unknown as App
+    const install = (ObservePlugin as { install?: (app: App) => void }).install
+    expect(typeof install).toBe('function')
+    install!(stubApp)
     expect(directives.observe).toBe(vObserve)
   })
 
@@ -470,7 +499,7 @@ describe('public API', () => {
       threshold: 320,
       direction: 'up',
       bracket: '320-640',
-      from: null,
+      from: { width: 300, height: 480 },
       to: { width: 320, height: 480 },
     }
     const _resizeTick: ResizeTickEvent = {
@@ -612,6 +641,9 @@ describe('intersect: thresholds + crossed', () => {
       },
     })
 
+    // The first callback is the baseline — nothing has been crossed yet.
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+
     fire(host, { isIntersecting: true, intersectionRatio: 0.25 })
     fire(host, { isIntersecting: true, intersectionRatio: 0.6 })
 
@@ -650,6 +682,9 @@ describe('intersect: thresholds + crossed', () => {
       },
     })
 
+    // The first callback is the baseline — nothing has been crossed yet.
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+
     fire(host, { isIntersecting: true, intersectionRatio: 0.5 })
     expect(events.map((e) => e.threshold)).toEqual([0.5])
     expect(events[0].direction).toBe('up')
@@ -684,6 +719,9 @@ describe('intersect: thresholds + crossed', () => {
       },
     })
 
+    // The first callback is the baseline — nothing has been crossed yet.
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+
     fire(host, { isIntersecting: true, intersectionRatio: 0.6 })
     expect(events.map((e) => e.threshold)).toEqual([0.25, 0.5])
 
@@ -701,6 +739,9 @@ describe('intersect: thresholds + crossed', () => {
         crossed: (e) => events.push(e),
       },
     })
+
+    // The first callback is the baseline — nothing has been crossed yet.
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
 
     fire(host, { isIntersecting: true, intersectionRatio: 0.7 })
     expect(events[0].ratio).toBe(0.7)
@@ -729,8 +770,73 @@ describe('intersect: thresholds + crossed', () => {
       },
     })
 
+    // The first callback is the baseline — nothing has been crossed yet.
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+
     fire(host, { isIntersecting: true, intersectionRatio: 0.6 })
     expect(events.map((e) => e.threshold)).toEqual([0.5])
+    unmount()
+  })
+
+  // A crossing needs a ratio to have crossed *from*. `lastRatio` used to be
+  // initialised to a fabricated 0, so an element that merely mounted 60%
+  // visible emitted an `up` crossing for every threshold below 0.6 — the
+  // README's infinite-scroll sentinel called loadNextPage() during mount.
+  it('emits no crossings on the first callback, however visible the element already is', () => {
+    const events: IntersectCrossEvent[] = []
+    const { host, unmount } = mount({
+      intersect: { thresholds: [0.1, 0.25, 0.5], crossed: (e) => events.push(e) },
+    })
+
+    fire(host, { isIntersecting: true, intersectionRatio: 0.6 })
+    expect(events).toEqual([])
+
+    // …and the baseline it established is real: the next move crosses from 0.6.
+    fire(host, { isIntersecting: true, intersectionRatio: 0.2 })
+    expect(events.map((e) => e.threshold)).toEqual([0.5, 0.25])
+    expect(events.every((e) => e.direction === 'down')).toBe(true)
+    unmount()
+  })
+
+  // `[0]` is the natural way to ask "tell me when it enters at all". The
+  // ascending rule `prev < t <= next` can never fire for t === 0, while the
+  // descending rule fires on every full exit, so enter/leave bookkeeping
+  // drifted by one every cycle.
+  it('thresholds: [0] pairs every `down` crossing with an `up`', () => {
+    const events: IntersectCrossEvent[] = []
+    const { host, unmount } = mount({
+      intersect: { thresholds: [0], crossed: (e) => events.push(e) },
+    })
+
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+    fire(host, { isIntersecting: true, intersectionRatio: 0.4 })
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+    fire(host, { isIntersecting: true, intersectionRatio: 0.9 })
+
+    expect(events.map((e) => `${e.threshold}:${e.direction}`)).toEqual([
+      '0:up',
+      '0:down',
+      '0:up',
+    ])
+    unmount()
+  })
+
+  // The observer samples at the threshold set it was CONSTRUCTED with, so a
+  // swap that changed only the crossing math would feed ratios of one
+  // granularity into the thresholds of another.
+  it('a thresholds swap rebuilds the observer so sampling and crossing math agree', async () => {
+    const { host, setOpts, unmount } = mount({
+      intersect: { thresholds: [0.5], crossed: () => {} },
+    })
+    const first = (ioByElement.get(host)![0] as unknown as MockIntersectionObserver)
+    expect(first.thresholds).toEqual([0.5])
+
+    await setOpts({ intersect: { thresholds: [0.1, 0.9], crossed: () => {} } })
+
+    expect(first.disconnected).toBe(true)
+    const second = (ioByElement.get(host)![0] as unknown as MockIntersectionObserver)
+    expect(second).not.toBe(first)
+    expect(second.thresholds).toEqual([0.1, 0.9])
     unmount()
   })
 })
@@ -1147,6 +1253,41 @@ describe('environment defenses', () => {
     ).not.toThrow()
   })
 
+  // The CSS hook used to report `intersect:hidden` forever on an engine with
+  // no IntersectionObserver, because `hidden` was the initial value and
+  // nothing else ever wrote the segment. README recipe 5 teaches
+  // `.card { opacity: 0 }` + `[data-observe-state*='intersect:visible'] { opacity: 1 }`,
+  // so the content was permanently invisible — a blank page, no error. The gate
+  // already failed OPEN in exactly this situation; the two now agree.
+  it('with no IntersectionObserver the intersect segment is `visible`, not `hidden`', () => {
+    uninstallIOMock()
+    const { host, unmount } = mount({ intersect: { on: () => {} } })
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:visible;resize:-;mutate:-')
+    unmount()
+  })
+
+  it('with no IntersectionObserver a gated mode still fires — the gate and the CSS hook agree', () => {
+    uninstallIOMock()
+    const events: ResizeEvent[] = []
+    const { host, unmount } = mount({
+      intersect: { on: () => {} },
+      resize: { gateOnIntersect: true, handler: (e) => events.push(e) },
+    })
+    fireResize(host, { width: 500, height: 400 })
+    expect(events).toHaveLength(1)
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:visible;resize:active;mutate:-')
+    unmount()
+  })
+
+  it('`-` is reserved for "this binding did not ask for the mode"', () => {
+    uninstallIOMock()
+    uninstallROMock()
+    uninstallMOMock()
+    const { host, unmount } = mount({})
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:-;mutate:-')
+    unmount()
+  })
+
   it('directive mounted hook is callable with no DOM globals (smoke check)', () => {
     // Calling the hook directly with a stub element + bindable shape ensures
     // the directive does not assume `window` / `document` exist at call time
@@ -1554,12 +1695,32 @@ describe('resize: axis option', () => {
 /* ------------------------------------------------------------------ */
 
 describe('resize: orientation mode', () => {
-  it('fires only on portrait↔landscape flip', () => {
+  // An orientation-mode consumer used to get NOTHING until the user resized:
+  // the first measurable orientation was swallowed as "the baseline", so a
+  // layout keyed on the event never initialised and the `resize:` segment
+  // stayed at `idle` through first paint.
+  it('fires once for the first measurable orientation, with from: null', () => {
     const events: ResizeEvent[] = []
     const { host, unmount } = mount({
       resize: { on: 'orientation', handler: (e) => events.push(e) },
     })
-    fireResize(host, { width: 400, height: 800 }) // portrait baseline
+    fireResize(host, { width: 400, height: 800 })
+    expect(events).toHaveLength(1)
+    if (events[0].mode === 'orientation') {
+      expect(events[0].from).toBeNull()
+      expect(events[0].to).toBe('portrait')
+    }
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:portrait;mutate:-')
+    unmount()
+  })
+
+  it('then fires only on portrait↔landscape flips', () => {
+    const events: ResizeEvent[] = []
+    const { host, unmount } = mount({
+      resize: { on: 'orientation', handler: (e) => events.push(e) },
+    })
+    fireResize(host, { width: 400, height: 800 }) // portrait — initial event
+    events.length = 0
     fireResize(host, { width: 410, height: 800 }) // still portrait
     fireResize(host, { width: 420, height: 800 }) // still portrait
     expect(events).toHaveLength(0)
@@ -1580,6 +1741,7 @@ describe('resize: orientation mode', () => {
       resize: { on: 'orientation', handler: (e) => events.push(e) },
     })
     fireResize(host, { width: 1280, height: 720 })
+    events.length = 0
     fireResize(host, { width: 400, height: 800 })
     expect(events).toHaveLength(1)
     if (events[0].mode === 'orientation') {
@@ -1595,6 +1757,7 @@ describe('resize: orientation mode', () => {
       resize: { on: 'orientation', handler: (e) => events.push(e) },
     })
     fireResize(host, { width: 500, height: 480 }) // landscape baseline
+    events.length = 0
     fireResize(host, { width: 500, height: 500 }) // → square flip
     expect(events).toHaveLength(1)
     if (events[0].mode === 'orientation') {
@@ -1609,10 +1772,42 @@ describe('resize: orientation mode', () => {
       resize: { on: 'orientation', squareTolerance: 0.05, handler: (e) => events.push(e) },
     })
     fireResize(host, { width: 600, height: 400 }) // landscape baseline (ratio 1.5)
+    events.length = 0
     // ratio = 1.03 → within 5% of 1.0 → square
     fireResize(host, { width: 1030, height: 1000 })
     expect(events).toHaveLength(1)
     if (events[0].mode === 'orientation') expect(events[0].to).toBe('square')
+    unmount()
+  })
+
+  // A `display: none` panel reports 0x0. That is not square, it is unmeasured
+  // — calling it square made a v-if toggle emit landscape → square → landscape
+  // and write `resize:square` into the CSS hook from an aspect ratio that did
+  // not exist at that moment.
+  it('a 0x0 box emits no orientation event and leaves the segment alone', () => {
+    const events: ResizeEvent[] = []
+    const { host, unmount } = mount({
+      resize: { on: 'orientation', handler: (e) => events.push(e) },
+    })
+    fireResize(host, { width: 800, height: 400 }) // landscape
+    events.length = 0
+
+    fireResize(host, { width: 0, height: 0 }) // hidden
+    expect(events).toHaveLength(0)
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:landscape;mutate:-')
+
+    fireResize(host, { width: 800, height: 400 }) // shown again, same shape
+    expect(events).toHaveLength(0)
+    unmount()
+  })
+
+  it('tick mode reports orientation null for a degenerate box rather than square', () => {
+    const events: ResizeTickEvent[] = []
+    const { host, unmount } = mount({
+      resize: { handler: (e) => { if (e.mode === 'tick') events.push(e) } },
+    })
+    fireResize(host, { width: 0, height: 0 })
+    expect(events[0].orientation).toBeNull()
     unmount()
   })
 })
@@ -1932,13 +2127,16 @@ describe('mutate: setup', () => {
     b.unmount()
   })
 
-  it('throws when mutate config is provided but handler is missing — no, missing handler is a no-op', () => {
-    // No-throw contract: handler is optional. Without one, the directive still
-    // wires the observer (so segment + state attribute update), but events drop.
-    expect(() => {
-      const { unmount } = mount({ mutate: { on: 'attr:class' } })
-      unmount()
-    }).not.toThrow()
+  it('a mutate config with no handler is a no-op, not an error — the segment still moves', () => {
+    // The handler is optional: the directive still wires the observer, so the
+    // CSS hook works for a consumer who only wants `mutate:active`.
+    const { host, unmount } = mount({ mutate: { on: 'attr:class' } })
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:-;mutate:idle')
+    expect(() =>
+      fireMutation(host, { type: 'attributes', attributeName: 'class', oldValue: 'a', target: host }),
+    ).not.toThrow()
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:-;mutate:active')
+    unmount()
   })
 })
 
@@ -2013,7 +2211,7 @@ describe('mutate: semantic event types', () => {
     if (typeof vObserve === 'function') throw new Error('expected directive object')
     vObserve.mounted!(b, {
       value: { mutate: { on: 'removed', handler: () => {} } },
-    } as DirectiveBinding<ObserveOptions | undefined>, null as never, null as never)
+    } as unknown as DirectiveBinding<ObserveOptions | undefined>, null as never, null as never)
 
     // The parent now has an observer attached.
     expect(moByElement.has(a)).toBe(true)
@@ -2131,21 +2329,78 @@ describe('mutate: diff payload', () => {
     unmount()
   })
 
-  it('text fires with { type:"text", from, to, target } — `to` reads from the text node', () => {
+  it('text fires with { type:"text", from, to, target } — both sides read the HOST', () => {
     const events: MutateEvent[] = []
     const { host, unmount } = mount({ mutate: { on: 'text', handler: (e) => events.push(e) } })
-    const textNode = document.createTextNode('after')
-    host.appendChild(textNode)
+    host.textContent = 'before'
+    // The baseline is captured at setup, so the first edit diffs from ''.
+    fireMutation(host, { type: 'childList', target: host, addedNodes: [host.firstChild!] })
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: 'text', from: '', to: 'before', target: host })
+
+    const textNode = host.firstChild as Text
+    textNode.data = 'after'
+    fireMutation(host, { type: 'characterData', target: textNode, oldValue: 'before' })
+    expect(events).toHaveLength(2)
+    expect(events[1]).toMatchObject({ type: 'text', from: 'before', to: 'after' })
+    unmount()
+  })
+
+  // `to` used to be the changed NODE's textContent while `from` came from the
+  // first record's oldValue — in a batch touching two nodes, a diff between two
+  // unrelated strings. The contenteditable validator in README recipe 15 starts
+  // judging one line the moment the user presses Enter.
+  it('a multi-node host reports the whole text, not the fragment that changed', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({ mutate: { on: 'text', handler: (e) => events.push(e) } })
+    const first = document.createTextNode('line one')
+    const second = document.createTextNode(' line two')
+    host.append(first, second)
+    fireMutation(host, [
+      { type: 'childList', target: host, addedNodes: [first, second] },
+    ])
+    events.length = 0
+
+    // The user edits only the second node.
+    second.data = ' LINE TWO'
+    fireMutation(host, { type: 'characterData', target: second, oldValue: ' line two' })
+
+    expect(events).toHaveLength(1)
+    expect(events[0].from).toBe('line one line two')
+    expect(events[0].to).toBe('line one LINE TWO')
+  unmount()
+  })
+
+  // `<div>{{ msg }}</div>` compiles to `el.textContent = …`, which replaces the
+  // text node: a childList mutation. Subscribing to characterData alone meant
+  // the single most common Vue text update produced no `text` event at all.
+  it('a textContent replacement (childList) is a text event', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({ mutate: { on: 'text', handler: (e) => events.push(e) } })
+    const before = document.createTextNode('old')
+    host.appendChild(before)
+    fireMutation(host, { type: 'childList', target: host, addedNodes: [before] })
+    events.length = 0
+
+    host.textContent = 'new'
     fireMutation(host, {
-      type: 'characterData',
-      target: textNode,
-      oldValue: 'before',
+      type: 'childList',
+      target: host,
+      addedNodes: [host.firstChild!],
+      removedNodes: [before],
     })
     expect(events).toHaveLength(1)
-    expect(events[0].type).toBe('text')
-    expect(events[0].from).toBe('before')
-    expect(events[0].to).toBe('after')
-    expect(events[0].target).toBe(host)
+    expect(events[0]).toMatchObject({ type: 'text', from: 'old', to: 'new' })
+    unmount()
+  })
+
+  it('a childList record that leaves the text unchanged emits no text event', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({ mutate: { on: 'text', handler: (e) => events.push(e) } })
+    const el = document.createElement('span')
+    host.appendChild(el)
+    fireMutation(host, { type: 'childList', target: host, addedNodes: [el] })
+    expect(events).toHaveLength(0)
     unmount()
   })
 
@@ -2238,7 +2493,7 @@ describe('mutate: self-removal detection', () => {
 
     vObserve.mounted!(
       host,
-      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as DirectiveBinding<ObserveOptions | undefined>,
+      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as unknown as DirectiveBinding<ObserveOptions | undefined>,
       null as never,
       null as never,
     )
@@ -2267,7 +2522,7 @@ describe('mutate: self-removal detection', () => {
 
     vObserve.mounted!(
       host,
-      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as DirectiveBinding<ObserveOptions | undefined>,
+      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as unknown as DirectiveBinding<ObserveOptions | undefined>,
       null as never,
       null as never,
     )
@@ -2296,7 +2551,7 @@ describe('mutate: self-removal detection', () => {
 
     vObserve.mounted!(
       host,
-      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as DirectiveBinding<ObserveOptions | undefined>,
+      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as unknown as DirectiveBinding<ObserveOptions | undefined>,
       null as never,
       null as never,
     )
@@ -2322,7 +2577,7 @@ describe('mutate: self-removal detection', () => {
 
     vObserve.mounted!(
       host,
-      { value: { mutate: { on: 'attr:class', handler: (e: MutateEvent) => events.push(e) } } } as DirectiveBinding<ObserveOptions | undefined>,
+      { value: { mutate: { on: 'attr:class', handler: (e: MutateEvent) => events.push(e) } } } as unknown as DirectiveBinding<ObserveOptions | undefined>,
       null as never,
       null as never,
     )
@@ -2341,7 +2596,7 @@ describe('mutate: self-removal detection', () => {
 
     vObserve.mounted!(
       host,
-      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as DirectiveBinding<ObserveOptions | undefined>,
+      { value: { mutate: { on: 'removed', handler: (e: MutateEvent) => events.push(e) } } } as unknown as DirectiveBinding<ObserveOptions | undefined>,
       null as never,
       null as never,
     )
@@ -2370,7 +2625,7 @@ describe('mutate: self-removal detection', () => {
     expect(() => {
       vObserve.mounted!(
         orphan,
-        { value: { mutate: { on: 'removed', handler: () => {} } } } as DirectiveBinding<ObserveOptions | undefined>,
+        { value: { mutate: { on: 'removed', handler: () => {} } } } as unknown as DirectiveBinding<ObserveOptions | undefined>,
         null as never,
         null as never,
       )
@@ -2388,7 +2643,7 @@ describe('mutate: self-removal detection', () => {
 
     vObserve.mounted!(
       host,
-      { value: { mutate: { on: ['attr:class', 'removed'], handler: (e: MutateEvent) => events.push(e) } } } as DirectiveBinding<ObserveOptions | undefined>,
+      { value: { mutate: { on: ['attr:class', 'removed'], handler: (e: MutateEvent) => events.push(e) } } } as unknown as DirectiveBinding<ObserveOptions | undefined>,
       null as never,
       null as never,
     )
@@ -2809,15 +3064,15 @@ describe('resize: breakpoint edge cases', () => {
 /* ------------------------------------------------------------------ */
 
 describe('resize: orientation edge cases', () => {
-  it('zero-dimension entries report orientation "square" (degenerate fallback)', () => {
-    const events: ResizeEvent[] = []
+  it('a degenerate box reports orientation null — an absent measurement, not a square one', () => {
+    const events: ResizeTickEvent[] = []
     const { host, unmount } = mount({
-      resize: { on: 'tick', handler: (e) => events.push(e) },
+      resize: { on: 'tick', handler: (e) => { if (e.mode === 'tick') events.push(e) } },
     })
     fireResize(host, { width: 0, height: 100 })
-    if (events[0]?.mode === 'tick') expect(events[0].orientation).toBe('square')
+    expect(events[0].orientation).toBeNull()
     fireResize(host, { width: 100, height: 0 })
-    if (events[1]?.mode === 'tick') expect(events[1].orientation).toBe('square')
+    expect(events[1].orientation).toBeNull()
     unmount()
   })
 
@@ -2889,6 +3144,58 @@ describe('resize: box modes — contentRect fallback', () => {
     if (events[1]?.mode === 'tick') {
       expect(events[1].to).toEqual({ width: 80, height: 80 })
     }
+    // …and the observed box moved with it, or the swap only changed what is
+    // reported and not what is watched.
+    expect(observeCallsFor(host).map((c) => c.options?.box)).toEqual(['border-box', 'content-box'])
+    unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — Resize: `box` decides what is OBSERVED, not only what is read */
+/*                                                                      */
+/*  `observe(el)` was called with no second argument, so the observed    */
+/*  box was always content-box. That is what decides WHEN a callback     */
+/*  fires: `device-pixel` exists to catch a devicePixelRatio change,     */
+/*  which produces no content-box change at all, so the one job the      */
+/*  option has was the one it could not do.                              */
+/* ------------------------------------------------------------------ */
+
+describe('resize: the `box` option reaches observe()', () => {
+  it('default border → observe(el, { box: "border-box" })', () => {
+    const { host, unmount } = mount({ resize: { handler: () => {} } })
+    expect(observeCallsFor(host)).toEqual([{ el: host, options: { box: 'border-box' } }])
+    unmount()
+  })
+
+  it('content → observe(el, { box: "content-box" })', () => {
+    const { host, unmount } = mount({ resize: { box: 'content', handler: () => {} } })
+    expect(observeCallsFor(host)[0].options).toEqual({ box: 'content-box' })
+    unmount()
+  })
+
+  it('device-pixel → observe(el, { box: "device-pixel-content-box" })', () => {
+    const { host, unmount } = mount({ resize: { box: 'device-pixel', handler: () => {} } })
+    expect(observeCallsFor(host)[0].options).toEqual({ box: 'device-pixel-content-box' })
+    unmount()
+  })
+
+  it('an engine that rejects device-pixel-content-box degrades to content-box rather than throwing', () => {
+    MockResizeObserver.rejectBoxes.add('device-pixel-content-box')
+    const { host, unmount } = mount({ resize: { box: 'device-pixel', handler: () => {} } })
+    expect(observeCallsFor(host).map((c) => c.options?.box)).toEqual(['content-box'])
+    unmount()
+  })
+
+  it('re-observes exactly once per box change, and not at all when the box is unchanged', async () => {
+    const { host, setOpts, unmount } = mount({ resize: { box: 'border', handler: () => {} } })
+    await setOpts({ resize: { box: 'border', debounce: 10, handler: () => {} } })
+    expect(observeCallsFor(host)).toHaveLength(1)
+    await setOpts({ resize: { box: 'device-pixel', debounce: 10, handler: () => {} } })
+    expect(observeCallsFor(host).map((c) => c.options?.box)).toEqual([
+      'border-box',
+      'device-pixel-content-box',
+    ])
     unmount()
   })
 })
@@ -2978,38 +3285,41 @@ describe('mutate: shape rebuilds on reactive `on` swap', () => {
 /*  Tests — Mutate: invalid selector resilience                        */
 /* ------------------------------------------------------------------ */
 
-describe('mutate: invalid selector resilience', () => {
-  it('an invalid selector in `match` does not break valid sibling selectors', () => {
-    const events: MutateEvent[] = []
-    const { host, unmount } = mount({
-      mutate: {
-        on: 'children:added',
-        match: ['>>>invalid<<<', '.valid'],
-        handler: (e) => events.push(e),
-      },
-    })
-    const node = document.createElement('div')
-    node.className = 'valid'
-    fireMutation(host, { type: 'childList', target: host, addedNodes: [node] })
-    expect(events).toHaveLength(1)
-    expect(events[0].added).toEqual([node])
-    unmount()
+// An unparseable selector used to be swallowed per-selector, so a one-character
+// typo left the mode permanently and silently dead: events were built, filtered
+// to empty, and dropped. There is no console warn anywhere in this package, so
+// absence was the consumer's only signal. It is now a bind-time throw, at the
+// line where the mistake was made.
+describe('mutate: an unparseable `match` selector', () => {
+  it('throws at bind time, naming the selector', () => {
+    expect(() =>
+      mount({ mutate: { on: 'children:added', match: '>>>invalid<<<', handler: () => {} } }),
+    ).toThrow(/v-observe.*match.*>>>invalid<<</s)
   })
 
-  it('all-invalid selectors silently drop events (no throw)', () => {
+  it('throws even when a valid selector sits beside it in the array', () => {
+    expect(() =>
+      mount({
+        mutate: { on: 'children:added', match: ['.valid', '>>>invalid<<<'], handler: () => {} },
+      }),
+    ).toThrow(/v-observe/)
+  })
+
+  it('a valid selector list still filters', () => {
     const events: MutateEvent[] = []
     const { host, unmount } = mount({
       mutate: {
         on: 'children:added',
-        match: ['>>>invalid<<<'],
+        match: ['.valid', 'li[data-x]'],
         handler: (e) => events.push(e),
       },
     })
-    const node = document.createElement('div')
-    expect(() => {
-      fireMutation(host, { type: 'childList', target: host, addedNodes: [node] })
-    }).not.toThrow()
-    expect(events).toHaveLength(0)
+    const hit = document.createElement('div')
+    hit.className = 'valid'
+    const miss = document.createElement('div')
+    fireMutation(host, { type: 'childList', target: host, addedNodes: [hit, miss] })
+    expect(events).toHaveLength(1)
+    expect(events[0].added).toEqual([hit])
     unmount()
   })
 })
@@ -3275,31 +3585,37 @@ describe('cross-observer gateOnIntersect runtime gating — resize', () => {
     }
   })
 
-  it('resize orientation mode: gated flips are not delivered; lastOrientation resets on restore', () => {
-    const events: ResizeEvent[] = []
+  it('resize orientation mode: gated flips are not delivered; the baseline resets on restore', () => {
+    const events: ResizeOrientationEvent[] = []
     const { host, unmount } = mount({
       intersect: { on: () => {} },
-      resize: { gateOnIntersect: true, on: 'orientation', handler: (e) => events.push(e) },
+      resize: {
+        gateOnIntersect: true,
+        on: 'orientation',
+        handler: (e) => { if (e.mode === 'orientation') events.push(e) },
+      },
     })
-    // visible: portrait baseline
+    // visible: the first measurable orientation is itself an event.
     fire(host, { isIntersecting: true, intersectionRatio: 1, boundingClientRect: mkRect({ top: 0 }) })
     fireResize(host, { width: 300, height: 600 }) // portrait
-    expect(events).toHaveLength(0) // first tick has no prior orientation → no flip
+    expect(events.map((e) => `${e.from}→${e.to}`)).toEqual(['null→portrait'])
     fireResize(host, { width: 800, height: 300 }) // landscape → flip
-    expect(events).toHaveLength(1)
-    expect((events[0] as ResizeOrientationEvent).from).toBe('portrait')
+    expect(events.map((e) => `${e.from}→${e.to}`)).toEqual(['null→portrait', 'portrait→landscape'])
 
     // hidden: silently flip back to portrait
     fire(host, { isIntersecting: false, intersectionRatio: 0, boundingClientRect: mkRect({ top: 0 }) })
     fireResize(host, { width: 300, height: 600 })
-    expect(events).toHaveLength(1) // gated
+    expect(events).toHaveLength(2) // gated
 
-    // visible: first post-restore is portrait, no prior baseline → no flip event
+    // visible again: the baseline was forgotten, so the consumer is told what
+    // the orientation IS rather than being handed a flip from a stale value
+    // it never saw ('landscape → portrait' would be a lie about the interim).
     fire(host, { isIntersecting: true, intersectionRatio: 1, boundingClientRect: mkRect({ top: 0 }) })
     fireResize(host, { width: 300, height: 600 })
-    expect(events).toHaveLength(1) // baseline reset; no synthetic flip
+    expect(events.at(-1)).toMatchObject({ from: null, to: 'portrait' })
     fireResize(host, { width: 800, height: 300 })
-    expect(events).toHaveLength(2) // genuine flip portrait → landscape
+    expect(events.at(-1)).toMatchObject({ from: 'portrait', to: 'landscape' })
+    expect(events).toHaveLength(4)
     unmount()
   })
 })
@@ -3437,19 +3753,25 @@ describe('cross-observer gateOnIntersect runtime gating — mutate', () => {
 })
 
 describe('cross-observer gateOnIntersect — interactions with intersect `once: true`', () => {
-  it('once: true visible disconnect → gated resize remains un-gated after restore (intersect stays "visible")', () => {
-    const tickEvents: ResizeEvent[] = []
-    const { host, unmount } = mount({
-      intersect: { once: true, on: () => {} },
-      resize: { gateOnIntersect: true, handler: (e) => tickEvents.push(e) },
-    })
-    fire(host, { isIntersecting: true, intersectionRatio: 1, boundingClientRect: mkRect({ top: 0 }) })
-    // intersect IO disconnects after `once: true` — but lastIsIntersecting
-    // is `true` in the internal, so subsequent gated dispatches pass through.
-    fireResize(host, { width: 500, height: 400 })
-    fireResize(host, { width: 600, height: 400 })
-    expect(tickEvents).toHaveLength(2)
-    unmount()
+  // `once` disconnects the observer after the first visible tick, and a gate
+  // with no live observer stops gating: the combination used to suppress work
+  // until the element was first seen and then never again, including after it
+  // scrolled far off-screen. Two options whose documented meanings cancel each
+  // other out are a config error, so they are refused where they were written.
+  it('once + gateOnIntersect is refused at bind time', () => {
+    expect(() =>
+      mount({
+        intersect: { once: true, on: () => {} },
+        resize: { gateOnIntersect: true, handler: () => {} },
+      }),
+    ).toThrow(/v-observe.*gateOnIntersect.*once/s)
+
+    expect(() =>
+      mount({
+        intersect: { once: true },
+        mutate: { gateOnIntersect: true, on: 'attr:class', handler: () => {} },
+      }),
+    ).toThrow(/v-observe.*gateOnIntersect.*once/s)
   })
 
   it('intersect-only consumer (no `on`) can still drive gating for resize', () => {
@@ -3504,5 +3826,631 @@ describe('cross-observer gateOnIntersect — interactions with intersect `once: 
     expect(tickEvents).toHaveLength(0) // gated
     expect(mutateEvents).toHaveLength(1) // ungated — fires regardless
     unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — Observer CONSTRUCTION options are reactive                  */
+/*                                                                      */
+/*  `root`, `rootMargin` and `thresholds` cannot be changed on a live    */
+/*  observer, and they were read exactly once — at the one moment they   */
+/*  are guaranteed to be wrong. Vue evaluates the binding object during  */
+/*  render, before template refs are assigned, so `root: scroller` is     */
+/*  `null` at `mounted` and the element only ever arrives via `updated`. */
+/*  Every `root:` recipe in the README and every playground demo that     */
+/*  passed one observed the viewport.                                    */
+/* ------------------------------------------------------------------ */
+
+describe('intersect: observer construction options are reactive', () => {
+  it('reproduces the template-ref timing: mounted sees root null, updated sees the element', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const scroller: Ref<HTMLElement | null> = ref(null)
+    const seen: (Element | Document | null | undefined)[] = []
+
+    const Comp = defineComponent({
+      setup() {
+        return () =>
+          h('div', { ref: scroller, 'data-scroller': '1' }, [
+            withDirectives(h('div', { 'data-host': '1' }), [
+              [vObserve, { intersect: { root: scroller.value, on: () => {} } }],
+            ]),
+          ])
+      },
+    })
+    const app = createApp(Comp)
+    app.mount(container)
+
+    const host = container.querySelector('[data-host]') as HTMLElement
+    seen.push((ioByElement.get(host)![0] as unknown as MockIntersectionObserver).root)
+    // The binding object was built during render — before `ref` was assigned.
+    expect(seen[0]).toBeNull()
+
+    // A re-render now carries the resolved element.
+    await nextTick()
+    ;(app._instance!.proxy as unknown as { $forceUpdate: () => void }).$forceUpdate()
+    await nextTick()
+
+    const live = ioByElement.get(host)![0] as unknown as MockIntersectionObserver
+    expect(live.root).toBe(container.querySelector('[data-scroller]'))
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('a root swap disconnects the old observer and observes against the new one', async () => {
+    const a = document.createElement('div')
+    const b = document.createElement('div')
+    document.body.append(a, b)
+    const { host, setOpts, unmount } = mount({ intersect: { root: a, on: () => {} } })
+
+    const first = ioByElement.get(host)![0] as unknown as MockIntersectionObserver
+    expect(first.root).toBe(a)
+
+    await setOpts({ intersect: { root: b, on: () => {} } })
+    expect(first.disconnected).toBe(true)
+    const second = ioByElement.get(host)![0] as unknown as MockIntersectionObserver
+    expect(second.root).toBe(b)
+    expect(second.observed.has(host)).toBe(true)
+    unmount()
+    a.remove()
+    b.remove()
+  })
+
+  it('a rootMargin swap rebuilds — the preload distance is not frozen at mount', async () => {
+    const { host, setOpts, unmount } = mount({ intersect: { rootMargin: '0px', on: () => {} } })
+    expect((ioByElement.get(host)![0] as unknown as MockIntersectionObserver).rootMargin).toBe('0px')
+    await setOpts({ intersect: { rootMargin: '240px 0px', on: () => {} } })
+    expect((ioByElement.get(host)![0] as unknown as MockIntersectionObserver).rootMargin).toBe('240px 0px')
+    expect(ioInstances).toHaveLength(2)
+    unmount()
+  })
+
+  it('a callback-only swap does NOT rebuild — the ratio baseline survives', async () => {
+    const seen: number[] = []
+    const { host, setOpts, unmount } = mount({
+      intersect: { thresholds: [0.5], crossed: (e) => seen.push(e.threshold) },
+    })
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+    await setOpts({ intersect: { thresholds: [0.5], crossed: (e) => seen.push(e.threshold) } })
+    expect(ioInstances).toHaveLength(1)
+    // The baseline established before the swap is still there, so this is a
+    // crossing rather than a new first callback.
+    fire(host, { isIntersecting: true, intersectionRatio: 0.9 })
+    expect(seen).toEqual([0.5])
+    unmount()
+  })
+
+  it('an identical root object across renders does not churn the observer', async () => {
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const { setOpts, unmount } = mount({ intersect: { root, rootMargin: '10px', on: () => {} } })
+    await setOpts({ intersect: { root, rootMargin: '10px', on: () => {} } })
+    await setOpts({ intersect: { root, rootMargin: '10px', on: () => {} } })
+    expect(ioInstances).toHaveLength(1)
+    unmount()
+    root.remove()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — `once` is the collapse signal, with or without `on`         */
+/* ------------------------------------------------------------------ */
+
+describe('intersect: `once` collapse does not depend on `on`', () => {
+  // `hasFired` was set inside `if (live.on)`, and the teardown check read it.
+  // With `{ once: true, thresholds, crossed }` and no `on`, the flag stayed
+  // false forever: the observer was never released and `crossed` kept firing
+  // on every scroll past the sentinel.
+  it('crossed-only + once disconnects after the first visible tick', () => {
+    const events: IntersectCrossEvent[] = []
+    const { host, unmount } = mount({
+      intersect: { once: true, thresholds: [0.5], crossed: (e) => events.push(e) },
+    })
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+    expect(ioByElement.has(host)).toBe(true)
+
+    fire(host, { isIntersecting: true, intersectionRatio: 0.8 })
+    expect(events.map((e) => `${e.threshold}:${e.direction}`)).toEqual(['0.5:up'])
+    expect(ioByElement.has(host)).toBe(false)
+    expect(ioInstances[0].disconnected).toBe(true)
+    unmount()
+  })
+
+  it('a bare `{ once: true }` with no callbacks at all still disconnects', () => {
+    const { host, unmount } = mount({ intersect: { once: true } })
+    fire(host, { isIntersecting: true, intersectionRatio: 1 })
+    expect(ioByElement.has(host)).toBe(false)
+    unmount()
+  })
+
+  it('the collapse survives a re-render — `once` is not "once per parent render"', async () => {
+    const onIntersect = vi.fn()
+    const { host, setOpts, unmount } = mount({ intersect: { once: true, on: onIntersect } })
+    fire(host, { isIntersecting: true, intersectionRatio: 1 })
+    expect(onIntersect).toHaveBeenCalledTimes(1)
+
+    await setOpts({ intersect: { once: true, on: onIntersect } })
+    expect(ioByElement.has(host)).toBe(false)
+    expect(ioInstances).toHaveLength(1)
+    expect(onIntersect).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('dropping intersect entirely and re-adding it starts a fresh observer', async () => {
+    const onIntersect = vi.fn()
+    const { host, setOpts, unmount } = mount({ intersect: { once: true, on: onIntersect } })
+    fire(host, { isIntersecting: true, intersectionRatio: 1 })
+    await setOpts({})
+    await setOpts({ intersect: { once: true, on: onIntersect } })
+    expect(ioByElement.has(host)).toBe(true)
+    fire(host, { isIntersecting: true, intersectionRatio: 1 })
+    expect(onIntersect).toHaveBeenCalledTimes(2)
+    unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — A throwing observer constructor produces ONE error          */
+/* ------------------------------------------------------------------ */
+
+describe('a rejected observer option reports one error, not two', () => {
+  // `state.intersect = internal` used to run before `new IntersectionObserver`,
+  // with `observer: null as unknown as IntersectionObserver`. A real
+  // IntersectionObserver throws RangeError for a threshold outside [0, 1] —
+  // a consumer-supplied number — and unmount then dereferenced the null,
+  // pointing the reader at a lifecycle bug that does not exist.
+  it('validates thresholds at bind time, before the constructor is reached', () => {
+    expect(() => mount({ intersect: { thresholds: [0, 1.5], on: () => {} } })).toThrow(
+      /v-observe.*thresholds.*between 0 and 1/s,
+    )
+    expect(ioInstances).toHaveLength(0)
+  })
+
+  it('rejects NaN and negative thresholds too', () => {
+    expect(() => mount({ intersect: { thresholds: [Number.NaN] } })).toThrow(/v-observe/)
+    expect(() => mount({ intersect: { thresholds: [-0.1] } })).toThrow(/v-observe/)
+  })
+
+  it('a constructor that throws anyway leaves nothing half-built for teardown to trip over', () => {
+    class ThrowingIO {
+      constructor() {
+        throw new SyntaxError("Failed to construct 'IntersectionObserver': rootMargin is not valid")
+      }
+    }
+    ;(globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver = ThrowingIO
+
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const mounted = vObserve.mounted as unknown as (el: HTMLElement, b: { value: ObserveOptions }) => void
+    const unmounted = vObserve.unmounted as unknown as (el: HTMLElement) => void
+
+    expect(() => mounted(el, { value: { intersect: { rootMargin: 'nonsense', on: () => {} } } })).toThrow(
+      /rootMargin is not valid/,
+    )
+    // The second error is the one that used to send people hunting.
+    expect(() => unmounted(el)).not.toThrow()
+    el.remove()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — A gated resize gets a measurement when the gate re-opens    */
+/*                                                                      */
+/*  Resize observations are gathered BEFORE intersection observations    */
+/*  are delivered, so with `gateOnIntersect: true` the mandatory first    */
+/*  RO callback is always dropped — even for an element visible at        */
+/*  mount. A real ResizeObserver does not re-send it for an element       */
+/*  whose box has not changed, so the consumer got no dimensions at all.  */
+/* ------------------------------------------------------------------ */
+
+describe('gateOnIntersect: restoring the gate asks for a fresh measurement', () => {
+  it('re-observes the element on hidden→visible', () => {
+    const { host, unmount } = mount({
+      intersect: { on: () => {} },
+      resize: { gateOnIntersect: true, handler: () => {} },
+    })
+    expect(observeCallsFor(host)).toHaveLength(1)
+
+    // The first RO callback arrives while intersect still says hidden and is
+    // dropped — exactly the browser's ordering.
+    fireResize(host, { width: 500, height: 400 })
+    fire(host, { isIntersecting: true, intersectionRatio: 1, boundingClientRect: mkRect({ top: 0 }) })
+
+    expect(observeCallsFor(host)).toHaveLength(2)
+    expect(observeCallsFor(host)[1].options).toEqual({ box: 'border-box' })
+    unmount()
+  })
+
+  it('re-observes with the configured box, not the default', () => {
+    const { host, unmount } = mount({
+      intersect: { on: () => {} },
+      resize: { gateOnIntersect: true, box: 'content', handler: () => {} },
+    })
+    fire(host, { isIntersecting: true, intersectionRatio: 1, boundingClientRect: mkRect({ top: 0 }) })
+    expect(observeCallsFor(host).map((c) => c.options?.box)).toEqual(['content-box', 'content-box'])
+    unmount()
+  })
+
+  it('does not re-observe a mode that is not gated', () => {
+    const { host, unmount } = mount({
+      intersect: { on: () => {} },
+      resize: { handler: () => {} },
+    })
+    fire(host, { isIntersecting: true, intersectionRatio: 1, boundingClientRect: mkRect({ top: 0 }) })
+    expect(observeCallsFor(host)).toHaveLength(1)
+    unmount()
+  })
+
+  it('does not re-observe on visible→visible ticks', () => {
+    const { host, unmount } = mount({
+      intersect: { on: () => {} },
+      resize: { gateOnIntersect: true, handler: () => {} },
+    })
+    fire(host, { isIntersecting: true, intersectionRatio: 0.4, boundingClientRect: mkRect({ top: 0 }) })
+    fire(host, { isIntersecting: true, intersectionRatio: 0.9, boundingClientRect: mkRect({ top: 0 }) })
+    expect(observeCallsFor(host)).toHaveLength(2)
+    unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — The bracket label a consumer reads is the one CSS shows     */
+/* ------------------------------------------------------------------ */
+
+describe('resize: bracket labels follow `axis`', () => {
+  // `bracketLabel(dims.width, …)` ignored `cfg.axis`, so with `axis: 'height'`
+  // a handler logging `e.bracket` and a stylesheet keyed on
+  // `[data-observe-state*='resize:…']` disagreed about the same element at the
+  // same instant.
+  it("axis: 'height' labels the tick event and the CSS segment from the height", () => {
+    const events: ResizeTickEvent[] = []
+    const { host, unmount } = mount({
+      resize: {
+        axis: 'height',
+        breakpoints: { narrow: 0, wide: 500 },
+        handler: (e) => { if (e.mode === 'tick') events.push(e) },
+      },
+    })
+    fireResize(host, { width: 300, height: 700 })
+    expect(events[0].bracket).toBe('wide')
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:wide;mutate:-')
+    unmount()
+  })
+
+  it("axis: 'width' (default) is unchanged", () => {
+    const events: ResizeTickEvent[] = []
+    const { host, unmount } = mount({
+      resize: {
+        breakpoints: { narrow: 0, wide: 500 },
+        handler: (e) => { if (e.mode === 'tick') events.push(e) },
+      },
+    })
+    fireResize(host, { width: 300, height: 700 })
+    expect(events[0].bracket).toBe('narrow')
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:narrow;mutate:-')
+    unmount()
+  })
+
+  // A jump over several thresholds stamped every event with the FINAL label,
+  // so the threshold-320 event claimed a bracket the element was never in at
+  // that crossing. README:477 calls the field "bracket label entered".
+  it('each crossing of a multi-bracket jump carries the bracket THAT crossing entered', () => {
+    const events: ResizeBracketEvent[] = []
+    const { host, unmount } = mount({
+      resize: {
+        on: 'crossed',
+        breakpoints: [320, 640],
+        handler: (e) => { if (e.mode === 'crossed') events.push(e) },
+      },
+    })
+    fireResize(host, { width: 200, height: 100 })
+    fireResize(host, { width: 800, height: 100 })
+    expect(events.map((e) => [e.threshold, e.bracket])).toEqual([
+      [320, '320-640'],
+      [640, '>=640'],
+    ])
+    unmount()
+  })
+
+  it('and the same on the way down', () => {
+    const events: ResizeBracketEvent[] = []
+    const { host, unmount } = mount({
+      resize: {
+        on: 'crossed',
+        breakpoints: [320, 640],
+        handler: (e) => { if (e.mode === 'crossed') events.push(e) },
+      },
+    })
+    fireResize(host, { width: 800, height: 100 })
+    fireResize(host, { width: 200, height: 100 })
+    expect(events.map((e) => [e.threshold, e.bracket])).toEqual([
+      [640, '320-640'],
+      [320, '<320'],
+    ])
+    unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — The state attribute is written by exactly one builder        */
+/* ------------------------------------------------------------------ */
+
+describe('data-observe-state: the grammar and the string cannot drift', () => {
+  // The old check was `const _x: ObserveStateAttribute = 'intersect:visible;…'`
+  // — a hand-written literal against a hand-written type, which cannot fail if
+  // the writer drifts from either. The type is now the writer's return type,
+  // so this reads the real attribute back and parses it against the grammar.
+  it('every string the directive writes parses as ObserveStateAttribute', () => {
+    const seen = new Set<string>()
+    const { host, unmount } = mount({
+      intersect: { on: () => {} },
+      resize: { breakpoints: { sm: 0, lg: 600 }, handler: () => {} },
+      mutate: { on: 'attr:class', handler: () => {} },
+    })
+    const snap = () => seen.add(host.getAttribute('data-observe-state')!)
+
+    snap()
+    fire(host, { isIntersecting: true, intersectionRatio: 1 })
+    snap()
+    fireResize(host, { width: 800, height: 100 })
+    snap()
+    fireResize(host, { width: 100, height: 100 })
+    snap()
+    fireMutation(host, { type: 'attributes', attributeName: 'class', oldValue: 'a', target: host })
+    snap()
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+    snap()
+
+    expect(seen.size).toBeGreaterThan(3)
+    for (const value of seen) {
+      const m = /^intersect:(visible|hidden|-);resize:([^;]+);mutate:(active|idle|-)$/.exec(value)
+      expect(m, `not a valid data-observe-state: ${value}`).not.toBeNull()
+      // The compiler agrees, on the same string the DOM holds.
+      const typed: ObserveStateAttribute = value as ObserveStateAttribute
+      expect(typed).toBe(value)
+    }
+    unmount()
+  })
+
+  it('an unchanged state does not rewrite the attribute', () => {
+    const { host, unmount } = mount({ intersect: { on: () => {} } })
+    const writes: string[] = []
+    const original = host.setAttribute.bind(host)
+    host.setAttribute = ((name: string, value: string) => {
+      if (name === 'data-observe-state') writes.push(value)
+      original(name, value)
+    }) as typeof host.setAttribute
+
+    fire(host, { isIntersecting: true, intersectionRatio: 0.4 })
+    fire(host, { isIntersecting: true, intersectionRatio: 0.6 })
+    fire(host, { isIntersecting: true, intersectionRatio: 0.9 })
+    expect(writes).toEqual(['intersect:visible;resize:-;mutate:-'])
+    unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — Against a real MutationObserver                             */
+/*                                                                      */
+/*  The directive writes `data-observe-state` on the host it observes.   */
+/*  `setAttribute` queues a MutationRecord even when the value is         */
+/*  unchanged, so `mutate: { on: 'attr:*' }` used to observe its own      */
+/*  write, flush, write again — a microtask loop with no stack and no     */
+/*  error, i.e. a frozen tab. Nothing in the mock-driven suite could see  */
+/*  it, because no MutationObserver in it ever watched a real DOM write.  */
+/* ------------------------------------------------------------------ */
+
+describe('mutate: against a real MutationObserver', () => {
+  beforeEach(() => {
+    ;(globalThis as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver =
+      RealMutationObserver
+  })
+
+  /** Watchdog-wrapped mount: a regression must fail the test, not hang the run. */
+  function mountWatched(opts: ObserveOptions, cap = 200) {
+    const events: MutateEvent[] = []
+    let stop: (() => void) | null = null
+    const cfg = opts.mutate!
+    const mounted = mount({
+      ...opts,
+      mutate: {
+        ...cfg,
+        handler: (e) => {
+          events.push(e)
+          if (events.length >= cap) stop?.()
+        },
+      },
+    })
+    stop = mounted.unmount
+    return { ...mounted, events }
+  }
+
+  it("'attr:*' reports one external attribute change and nothing else", async () => {
+    const { host, events, unmount } = mountWatched({ mutate: { on: 'attr:*' } })
+
+    host.setAttribute('data-kick', '1')
+    await new Promise((r) => setTimeout(r, 400))
+
+    expect(events.map((e) => e.type)).toEqual(['attr:data-kick'])
+    expect(events[0]).toMatchObject({ name: 'data-kick', from: null, to: '1' })
+    unmount()
+  })
+
+  it("'attr:*' still settles after the mutate:active → idle cooldown re-writes the attribute", async () => {
+    const { host, events, unmount } = mountWatched({ mutate: { on: 'attr:*' } })
+
+    host.setAttribute('data-kick', '1')
+    await new Promise((r) => setTimeout(r, 60))
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:-;mutate:active')
+
+    await new Promise((r) => setTimeout(r, 400))
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:-;mutate:idle')
+    expect(events).toHaveLength(1)
+    unmount()
+  })
+
+  it('subscribing to the state attribute by name is dropped rather than honoured', async () => {
+    const { host, events, unmount } = mountWatched({
+      mutate: { on: ['attr:data-observe-state', 'attr:data-kick'] },
+    })
+
+    host.setAttribute('data-kick', '1')
+    await new Promise((r) => setTimeout(r, 400))
+
+    expect(events.map((e) => e.type)).toEqual(['attr:data-kick'])
+    unmount()
+  })
+
+  it('an intersect tick rewriting the attribute does not wake the mutate handler', async () => {
+    const { host, events, unmount } = mountWatched({
+      intersect: { on: () => {} },
+      mutate: { on: 'attr:*' },
+    })
+    fire(host, { isIntersecting: true, intersectionRatio: 1 })
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:visible;resize:-;mutate:idle')
+
+    await new Promise((r) => setTimeout(r, 400))
+    expect(events).toHaveLength(0)
+    // Still idle: the handler never ran, so the segment was never flipped.
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:visible;resize:-;mutate:idle')
+    unmount()
+  })
+
+  it('real children:added / children:removed', async () => {
+    const { host, events, unmount } = mountWatched({
+      mutate: { on: ['children:added', 'children:removed'] },
+    })
+    const child = document.createElement('span')
+    host.appendChild(child)
+    await new Promise((r) => setTimeout(r, 50))
+    child.remove()
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(events.map((e) => e.type)).toEqual(['children:added', 'children:removed'])
+    expect(events[0].added).toEqual([child])
+    expect(events[1].removed).toEqual([child])
+    unmount()
+  })
+
+  it('a real `el.textContent = …` — the way Vue patches an interpolation — is a text event', async () => {
+    const { host, events, unmount } = mountWatched({ mutate: { on: 'text' } })
+    host.textContent = 'hello'
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(events.map((e) => e.type)).toEqual(['text'])
+    expect(events[0]).toMatchObject({ from: '', to: 'hello' })
+    unmount()
+  })
+
+  it('a real contenteditable split into two text nodes still diffs the whole host', async () => {
+    const { host, events, unmount } = mountWatched({ mutate: { on: 'text' } })
+    const first = document.createTextNode('line one')
+    host.appendChild(first)
+    await new Promise((r) => setTimeout(r, 50))
+    events.length = 0
+
+    // Enter: the editor splits the content into two nodes, then the user types
+    // into the second one only.
+    const second = document.createTextNode(' and two')
+    host.appendChild(second)
+    await new Promise((r) => setTimeout(r, 50))
+    second.data = ' and TWO'
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(events.at(-1)?.to).toBe('line one and TWO')
+    expect(events.at(-1)?.from).toBe('line one and two')
+    unmount()
+  })
+
+  it('a real self-removal fires `removed` exactly once', async () => {
+    const { host, events, unmount } = mountWatched({ mutate: { on: 'removed' } })
+    // A third party yanks the host out without unmounting Vue.
+    host.remove()
+    await new Promise((r) => setTimeout(r, 100))
+
+    expect(events.map((e) => e.type)).toEqual(['removed'])
+    unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Tests — Gaps found by mutating the source                           */
+/*                                                                      */
+/*  Each of these was a mutation the suite let through: the library was  */
+/*  right and nothing was watching. Reverting the line named in the      */
+/*  comment turns the test red.                                          */
+/* ------------------------------------------------------------------ */
+
+describe('mutation-testing gaps', () => {
+  // `uniqSorted` — the crossing loops walk the list in order, and the observer
+  // is constructed from it, so an unsorted list mis-orders both.
+  it('thresholds given out of order are sorted before use', () => {
+    const events: IntersectCrossEvent[] = []
+    const { host, unmount } = mount({
+      intersect: { thresholds: [0.75, 0.25, 0.5], crossed: (e) => events.push(e) },
+    })
+    expect((ioByElement.get(host)![0] as unknown as MockIntersectionObserver).thresholds).toEqual([
+      0.25, 0.5, 0.75,
+    ])
+
+    fire(host, { isIntersecting: false, intersectionRatio: 0 })
+    fire(host, { isIntersecting: true, intersectionRatio: 0.9 })
+    expect(events.map((e) => e.threshold)).toEqual([0.25, 0.5, 0.75])
+
+    events.length = 0
+    fire(host, { isIntersecting: true, intersectionRatio: 0.1 })
+    expect(events.map((e) => e.threshold)).toEqual([0.75, 0.5, 0.25])
+    unmount()
+  })
+
+  // `squareTolerance` is documented as a fraction of the LARGER dimension.
+  // 200x180 with 0.105 is square against the larger (21 >= 20) and landscape
+  // against the smaller (18.9 < 20), so it tells the two apart.
+  it('squareTolerance is a fraction of the larger dimension', () => {
+    const events: ResizeTickEvent[] = []
+    const { host, unmount } = mount({
+      resize: { squareTolerance: 0.105, handler: (e) => { if (e.mode === 'tick') events.push(e) } },
+    })
+    fireResize(host, { width: 200, height: 180 })
+    expect(events[0].orientation).toBe('square')
+    unmount()
+  })
+
+  // `text` turns on `subtree`, so childList records arrive for descendants too.
+  // Those are not the host's children.
+  it('a childList record from a descendant is not reported as a host child', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: ['children:added', 'text'], handler: (e) => events.push(e) },
+    })
+    const inner = document.createElement('ul')
+    host.appendChild(inner)
+    const grandchild = document.createElement('li')
+    inner.appendChild(grandchild)
+
+    fireMutation(host, { type: 'childList', target: inner, addedNodes: [grandchild] })
+    expect(events.map((e) => e.type)).toEqual([])
+    unmount()
+  })
+
+  // `stateMap.delete(el)` on unmount. Without it the cached "last written"
+  // string outlives the element's teardown, so a directive re-bound to the
+  // same element skips its initial write and the CSS hook is simply absent.
+  it('re-binding the directive to the same element rewrites the attribute', () => {
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const mounted = vObserve.mounted as unknown as (el: HTMLElement, b: { value: ObserveOptions }) => void
+    const unmounted = vObserve.unmounted as unknown as (el: HTMLElement) => void
+
+    mounted(el, { value: { intersect: { on: () => {} } } })
+    expect(el.getAttribute('data-observe-state')).toBe('intersect:hidden;resize:-;mutate:-')
+    unmounted(el)
+    expect(el.getAttribute('data-observe-state')).toBeNull()
+
+    mounted(el, { value: { intersect: { on: () => {} } } })
+    expect(el.getAttribute('data-observe-state')).toBe('intersect:hidden;resize:-;mutate:-')
+    unmounted(el)
+    el.remove()
   })
 })

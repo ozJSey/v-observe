@@ -1,65 +1,37 @@
 /**
- * The cross-observer `gateOnIntersect` contract — suppression check, the
- * baseline reset on hidden→visible, and the option validator that enforces
- * "a gate needs an intersect config to gate on".
+ * The cross-observer `gateOnIntersect` contract: the suppression check, and
+ * the baseline reset when the host becomes visible again.
+ *
+ * Both read `state.visibility`, which is the single record of what intersect
+ * last reported — not `state.intersect`, which disappears when `once`
+ * collapses the observer. The reset itself is delegated to each mode's own
+ * `resetGateBaseline`, defined in the module that owns those fields, so this
+ * file never has to keep a hand-maintained list of somebody else's state.
  */
 import type { ObserveState } from './state'
-import type { ObserveOptions } from './types'
 
 /**
- * Returns `true` when a mode configured with `gateOnIntersect: true` should
- * be suppressed at dispatch time. Falls back to `false` (no gate) when:
- * - the cfg has no `gateOnIntersect` flag; or
- * - intersect setup never wired up (e.g. `IntersectionObserver` unavailable)
- *   — graceful degradation prefers "always fire" over silently swallowing
- *   every event for the lifetime of the directive.
+ * Returns `true` when a mode configured with `gateOnIntersect: true` should be
+ * suppressed at dispatch time.
+ *
+ * Fails OPEN (no gate) when the cfg has no flag, and when visibility is
+ * `'unwired'` — no `IntersectionObserver` on this engine. Graceful degradation
+ * prefers "always fire" over swallowing every event for the directive's
+ * lifetime, and the CSS hook degrades the same way (`state-attribute.ts`).
  */
-export function isGated(
-  state: ObserveState,
-  cfg: { gateOnIntersect?: boolean },
-): boolean {
+export function isGated(state: ObserveState, cfg: { gateOnIntersect?: boolean }): boolean {
   if (!cfg.gateOnIntersect) return false
-  const i = state.intersect
-  if (!i) return false
-  return !i.lastIsIntersecting
+  return state.visibility === 'hidden'
 }
 
 /**
- * Called when intersect flips hidden→visible. Clears the baseline of any
- * mode running with `gateOnIntersect: true` so the first dispatch after
- * restore starts as a fresh "first tick" (`from: null`, no synthetic
- * orientation flip, no missed-bracket crossings).
+ * Called when intersect flips hidden→visible. Each gated mode forgets its
+ * baseline so the first dispatch after restore is a fresh "first tick"
+ * (`from: null`, no synthetic orientation flip, no missed-bracket crossings)
+ * and — for resize — asks the observer for a measurement it would otherwise
+ * never re-send.
  */
 export function onIntersectVisibilityRestored(state: ObserveState): void {
-  const r = state.resize
-  if (r && r.cfg.gateOnIntersect) {
-    r.lastDispatched = null
-    r.lastOrientation = null
-    if (r.timer !== null) {
-      clearTimeout(r.timer)
-      r.timer = null
-    }
-    r.pending = null
-  }
-  const m = state.mutate
-  if (m && m.cfg.gateOnIntersect) {
-    if (m.timer !== null) {
-      clearTimeout(m.timer)
-      m.timer = null
-    }
-    m.pending.clear()
-  }
-}
-
-export function validateOptions(opts: ObserveOptions): void {
-  if (opts.resize?.gateOnIntersect && !opts.intersect) {
-    throw new Error(
-      "[v-observe] resize.gateOnIntersect requires an intersect config — set `intersect: { ... }` alongside `resize: { gateOnIntersect: true }`.",
-    )
-  }
-  if (opts.mutate?.gateOnIntersect && !opts.intersect) {
-    throw new Error(
-      "[v-observe] mutate.gateOnIntersect requires an intersect config — set `intersect: { ... }` alongside `mutate: { gateOnIntersect: true }`.",
-    )
-  }
+  state.resize?.resetGateBaseline()
+  state.mutate?.resetGateBaseline()
 }

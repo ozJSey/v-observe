@@ -2,12 +2,17 @@
  * Resize mode — ResizeObserver wiring, breakpoint-bracket normalization and
  * crossing math, orientation inference, box-model reads (border / content /
  * device-pixel), debounce coalescing, and the resize segment.
+ *
+ * `box` is passed to `observe()`, not only used when reading the entry: the
+ * observed box decides *when a callback fires*. Watching the content box while
+ * reporting the border box means a border- or padding-only change — and a
+ * devicePixelRatio change, which is the entire point of `'device-pixel'` —
+ * never produces a callback at all.
  */
 import { isGated } from './gate'
 import { getOrCreate, stateMap, type NormalizedBreakpoints, type ObserveState, type ResizeInternal } from './state'
 import { writeStateAttribute } from './state-attribute'
 import type {
-  ObserveOptions,
   ResizeBox,
   ResizeConfig,
   ResizeDimensions,
@@ -15,6 +20,30 @@ import type {
   ResizeMode,
   ResizeOrientation,
 } from './types'
+
+const BOX_OPTION: Record<ResizeBox, ResizeObserverBoxOptions> = {
+  border: 'border-box',
+  content: 'content-box',
+  'device-pixel': 'device-pixel-content-box',
+}
+
+/**
+ * `'device-pixel-content-box'` is unimplemented in some engines (Safari at the
+ * time of writing) and `observe()` rejects the value rather than ignoring it.
+ * The size read already degrades to `contentBox × devicePixelRatio` there, so
+ * the observation degrades to the content box to match.
+ */
+function observeBox(observer: ResizeObserver, el: HTMLElement, box: ResizeBox): void {
+  if (box !== 'device-pixel') {
+    observer.observe(el, { box: BOX_OPTION[box] })
+    return
+  }
+  try {
+    observer.observe(el, { box: BOX_OPTION['device-pixel'] })
+  } catch {
+    observer.observe(el, { box: 'content-box' })
+  }
+}
 
 export function normalizeBreakpoints(bp: ResizeConfig['breakpoints']): NormalizedBreakpoints | null {
   if (bp === undefined) return null
@@ -58,14 +87,26 @@ function bracketIndex(d: number, thresholds: ReadonlyArray<number>): number {
   return thresholds.length
 }
 
+/** The dimension brackets are measured on. `'both'` emits crossings for each
+ *  axis but has to label with one of them, and width is the responsive default. */
+function bracketAxis(cfg: ResizeConfig): 'width' | 'height' {
+  return cfg.axis === 'height' ? 'height' : 'width'
+}
+
 function bracketLabel(d: number, n: NormalizedBreakpoints | null): string | null {
   if (!n) return null
   return n.labels[bracketIndex(d, n.thresholds)]
 }
 
-function computeOrientation(d: ResizeDimensions, tolerance: number): ResizeOrientation {
+/**
+ * `null` for a degenerate box. A `display: none` element reports 0×0, and 0×0
+ * is not square — it is unmeasured. Calling it square made hiding a panel emit
+ * a landscape→square→landscape flip and write `resize:square` into the CSS
+ * hook, from an aspect ratio that did not exist at that moment.
+ */
+function computeOrientation(d: ResizeDimensions, tolerance: number): ResizeOrientation | null {
   const { width: w, height: h } = d
-  if (w <= 0 || h <= 0) return 'square'
+  if (w <= 0 || h <= 0) return null
   if (tolerance > 0) {
     const larger = Math.max(w, h)
     if (Math.abs(w - h) <= larger * tolerance) return 'square'
@@ -110,6 +151,13 @@ function readDimensions(entry: ResizeObserverEntry, box: ResizeBox): ResizeDimen
 /*  Resize — dispatch + segment write                                  */
 /* ------------------------------------------------------------------ */
 
+/**
+ * One event per threshold crossed, each labelled with the bracket THAT
+ * crossing entered. Crossing `thresholds[i]` upward lands in `labels[i + 1]`;
+ * crossing it downward lands in `labels[i]`. Stamping every event of a
+ * multi-bracket jump with the final label made the intermediate events claim a
+ * bracket the element was never in at that threshold.
+ */
 function emitCrossingsForAxis(
   axis: 'width' | 'height',
   prev: number,
@@ -130,7 +178,7 @@ function emitCrossingsForAxis(
         axis,
         threshold: n.thresholds[i],
         direction: 'up',
-        bracket: n.labels[bracketIndex(next, n.thresholds)],
+        bracket: n.labels[i + 1],
         from: prevDims,
         to: nextDims,
       })
@@ -142,7 +190,7 @@ function emitCrossingsForAxis(
         axis,
         threshold: n.thresholds[i],
         direction: 'down',
-        bracket: n.labels[bracketIndex(next, n.thresholds)],
+        bracket: n.labels[i],
         from: prevDims,
         to: nextDims,
       })
@@ -156,7 +204,8 @@ function dispatchResize(el: HTMLElement, state: ObserveState, internal: ResizeIn
   const mode: ResizeMode = cfg.on ?? 'tick'
   const orientation = computeOrientation(dims, cfg.squareTolerance ?? 0)
   const normalized = internal.normalized
-  const bracket = bracketLabel(dims.width, normalized)
+  const axis = bracketAxis(cfg)
+  const label = bracketLabel(dims[axis], normalized)
 
   if (mode === 'tick') {
     const handler = cfg.handler
@@ -169,86 +218,77 @@ function dispatchResize(el: HTMLElement, state: ObserveState, internal: ResizeIn
           ? { width: dims.width - prev.width, height: dims.height - prev.height }
           : { width: 0, height: 0 },
         orientation,
-        bracket,
+        bracket: label,
       })
     }
   } else if (mode === 'crossed') {
     if (prev && normalized) {
       const handler = cfg.handler
       if (handler) {
-        const axis = cfg.axis ?? 'width'
-        if (axis === 'width' || axis === 'both') {
+        const configured = cfg.axis ?? 'width'
+        if (configured === 'width' || configured === 'both') {
           emitCrossingsForAxis('width', prev.width, dims.width, normalized, prev, dims, handler)
         }
-        if (axis === 'height' || axis === 'both') {
+        if (configured === 'height' || configured === 'both') {
           emitCrossingsForAxis('height', prev.height, dims.height, normalized, prev, dims, handler)
         }
       }
     }
-  } else {
-    // orientation
-    const lastOrient = internal.lastOrientation
-    if (lastOrient !== null && lastOrient !== orientation) {
-      const handler = cfg.handler
-      if (handler) {
-        handler({
-          mode: 'orientation',
-          from: lastOrient,
-          to: orientation,
-          ratio: dims.height === 0 ? 0 : dims.width / dims.height,
-          dimensions: dims,
-        })
-      }
+  } else if (orientation !== null && orientation !== internal.lastOrientation) {
+    // orientation — including the first measurable one, which is the only
+    // signal an orientation-mode consumer gets before the user resizes.
+    const handler = cfg.handler
+    if (handler) {
+      handler({
+        mode: 'orientation',
+        from: internal.lastOrientation,
+        to: orientation,
+        ratio: dims.height === 0 ? 0 : dims.width / dims.height,
+        dimensions: dims,
+      })
     }
   }
 
-  // Update segment.
-  let segment: string
+  // Segment. A degenerate box in orientation mode leaves the previous label
+  // alone rather than inventing one.
   if (mode === 'orientation') {
-    segment = orientation
-  } else if (normalized) {
-    segment = normalized.labels[bracketIndex(dims.width, normalized.thresholds)]
+    if (orientation !== null) internal.segment = orientation
   } else {
-    segment = 'active'
+    internal.segment = normalized ? normalized.labels[bracketIndex(dims[axis], normalized.thresholds)] : 'active'
   }
-  state.segments.resize = segment
-  writeStateAttribute(el, state.segments)
+  writeStateAttribute(el, state)
 
   internal.lastDispatched = dims
-  internal.lastOrientation = orientation
+  if (orientation !== null) internal.lastOrientation = orientation
 }
 
-export function setupResize(el: HTMLElement, cfg: ResizeConfig, opts: ObserveOptions): void {
+export function setupResize(el: HTMLElement, cfg: ResizeConfig, state?: ObserveState): void {
   if (typeof ResizeObserver === 'undefined') return
+  const s = state ?? getOrCreate(el)
 
-  const state = getOrCreate(el, opts)
-  if (state.resize) {
-    state.resize.cfg = cfg
-    state.resize.normalized = normalizeBreakpoints(cfg.breakpoints)
+  const existing = s.resize
+  if (existing) {
+    existing.cfg = cfg
+    existing.normalized = normalizeBreakpoints(cfg.breakpoints)
+    const box = cfg.box ?? 'border'
+    if (box !== existing.observedBox) {
+      existing.observedBox = box
+      existing.observer.unobserve(el)
+      observeBox(existing.observer, el, box)
+    }
     return
   }
 
-  const internal: ResizeInternal = {
-    cfg,
-    observer: null as unknown as ResizeObserver,
-    lastDispatched: null,
-    lastOrientation: null,
-    normalized: normalizeBreakpoints(cfg.breakpoints),
-    pending: null,
-    timer: null,
-  }
-  state.resize = internal
-
-  state.segments.resize = 'idle'
-  writeStateAttribute(el, state.segments)
-
   const observer = new ResizeObserver((entries) => {
     for (const entry of entries) {
-      if (entry.target !== el) continue
+      const internal = s.resize
+      if (!internal) return
       const live = internal.cfg
       // Cross-observer gate: skip the entire callback (no debounce timer, no
       // segment write, no internal state mutation) while intersect is hidden.
-      if (isGated(state, live)) continue
+      // `resetGateBaseline` re-observes on restore, so the measurement dropped
+      // here is asked for again rather than lost.
+      if (isGated(s, live)) continue
       const dims = readDimensions(entry, live.box ?? 'border')
 
       const debounce = live.debounce ?? 0
@@ -262,16 +302,42 @@ export function setupResize(el: HTMLElement, cfg: ResizeConfig, opts: ObserveOpt
           const pending = internal.pending
           if (pending === null) return
           internal.pending = null
-          dispatchResize(el, state, internal, pending)
-        }, debounce) as unknown as number
+          dispatchResize(el, s, internal, pending)
+        }, debounce)
       } else {
-        dispatchResize(el, state, internal, dims)
+        dispatchResize(el, s, internal, dims)
       }
     }
   })
 
-  internal.observer = observer
-  observer.observe(el)
+  const internal: ResizeInternal = {
+    cfg,
+    observer,
+    observedBox: cfg.box ?? 'border',
+    segment: 'idle',
+    lastDispatched: null,
+    lastOrientation: null,
+    normalized: normalizeBreakpoints(cfg.breakpoints),
+    pending: null,
+    timer: null,
+    resetGateBaseline: () => {
+      if (!internal.cfg.gateOnIntersect) return
+      internal.lastDispatched = null
+      internal.lastOrientation = null
+      if (internal.timer !== null) {
+        clearTimeout(internal.timer)
+        internal.timer = null
+      }
+      internal.pending = null
+      // The observation that arrived while the host was hidden was dropped,
+      // and ResizeObserver does not re-send it for an element whose box has
+      // not changed since. Re-observing is how you ask for it again.
+      internal.observer.unobserve(el)
+      observeBox(internal.observer, el, internal.observedBox)
+    },
+  }
+  s.resize = internal
+  observeBox(observer, el, internal.observedBox)
 }
 
 export function teardownResize(el: HTMLElement): void {

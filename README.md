@@ -1,18 +1,25 @@
 # @ozjsey/v-observe
 
-See in action: [npm portfolio playground](https://ozjsey.github.io/npm-portfolio-playground/#v-observe).
+See in action: **[npm portfolio playground →
+`#v-observe`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe)** — 17 cards, one per
+feature, every one editable in the browser. Recent behaviour changes are in
+[`CHANGELOG.md`](./CHANGELOG.md); 0.2.0 fixed four things that made a documented option do nothing
+at all, so read it before upgrading from 0.1.0.
 
-## Playground
-
-Try the live examples in the [npm portfolio playground](https://github.com/ozJSey/npm-portfolio-playground).
+Straight to a card: [`intersect`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/lazy-once) · [`resize`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/resize-tick) ·
+[`mutate`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/mutate-attr) · [`gateOnIntersect`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/gate-on-intersect) ·
+[all three at once](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/combined). Each recipe below names its own.
 
 Vue 3 directive owning **`IntersectionObserver`** + **`ResizeObserver`** + **`MutationObserver`** in one binding — with scroll-direction inference, per-threshold `crossed` events, breakpoint brackets, orientation crossings, child / attribute / text mutation diffs, self-removal detection, and a unified **`data-observe-state`** CSS hook.
 
 - Zero runtime dependencies (Vue 3 peer only)
 - Single directive, three observer modes
-- Reactive cfg swap — live update without remount
-- SSR-safe (no top-level DOM access)
+- Fully reactive — callback swaps stay in place, and the options an observer must be *constructed*
+  with (`root`, `rootMargin`, `thresholds`, `box`) rebuild it, so a template ref that only resolves
+  after the first render still works
+- SSR-safe (no top-level DOM access), and every degradation fails open
 - `data-observe-state="intersect:…;resize:…;mutate:…"` for CSS-only UI
+- The published tarball contains `src/` — copy the folder if you would rather vendor than install
 
 ## Install
 
@@ -42,6 +49,13 @@ createApp(App).directive('observe', vObserve).mount('#app')
 ```
 
 ## Recipes — intersect
+
+> **Each of these is a card**, running in a real scroller with the events printed as they arrive:
+> [1 lazy-load, `once: true`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/lazy-once) ·
+> [2 multi-threshold `crossed`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/thresholds-crossed) ·
+> [4 direction inference](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/direction) ·
+> [5 CSS-only visible state](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/css-only) ·
+> [6 custom `root` + `rootMargin`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/root-margin)
 
 ### 1. Lazy-load — fire once when visible
 
@@ -155,7 +169,24 @@ const scroller = ref<HTMLElement | null>(null)
 </template>
 ```
 
+`root`, `rootMargin` and `thresholds` are the options the `IntersectionObserver` is *constructed*
+with, and a live observer cannot be reconfigured — so the directive compares them on every binding
+update and rebuilds when one changes. That is what makes the recipe above work at all: Vue
+evaluates the binding object during render, before template refs are assigned, so `root` is `null`
+on the first pass and the element only arrives on the next one. Before 0.2.0 the first value was
+kept forever and every `root:` in this README observed the viewport.
+
+Changing them costs an observer. Callback-only swaps (`on`, `crossed`) do not rebuild, so the
+crossing baseline survives.
+
 ## Recipes — resize
+
+> [7 tick mode with from/to/delta](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/resize-tick) ·
+> [8 breakpoint brackets](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/resize-breakpoints) ·
+> [9 `on: 'crossed'`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/resize-crossed) ·
+> [10 `on: 'orientation'`](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/resize-orientation) ·
+> [11-12 box modes and debounce](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/resize-box-debounce) — the box modes matter most here:
+> `device-pixel-content-box` is the one a canvas needs and the one you cannot eyeball from a table.
 
 ### 7. Live dimension readout (tick mode)
 
@@ -287,7 +318,16 @@ function onResize(e: ResizeEvent) {
 </template>
 ```
 
-`box: 'device-pixel'` falls back to `contentBox × devicePixelRatio` when the browser lacks `devicePixelContentBoxSize`.
+`box` is passed to `ResizeObserver.observe()`, so it decides **when a callback fires**, not only
+what the dimensions mean. That is the whole point of `'device-pixel'`: a `devicePixelRatio` change
+— a zoom, or the window moving to a different monitor — produces no content-box change at all, so
+watching the content box means the callback never arrives and the canvas stays blurry. Likewise
+`'border'` sees a border- or padding-only change that leaves the content box where it was.
+
+The read falls back to `contentBox × devicePixelRatio` when the browser lacks
+`devicePixelContentBoxSize`, and the *observation* degrades to the content box on engines that
+reject `device-pixel-content-box` outright (Safari, at the time of writing) — so the option never
+throws, it just cannot beat the engine.
 
 ### 12. Debounced expensive layout
 
@@ -297,9 +337,17 @@ function onResize(e: ResizeEvent) {
 </template>
 ```
 
-`debounce: 150` coalesces tick storms — handler fires once at the trailing edge with the final dimensions.
+`debounce: 150` is a trailing-edge debounce, not a rate limit: the timer restarts on every
+callback, so a continuous drag produces **no** call at all until it stops, and then exactly one
+with the final dimensions.
 
 ## Recipes — mutate
+
+> [13 attribute diffs](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/mutate-attr) ·
+> [14 children added/removed, filtered](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/mutate-children) ·
+> [15 text edits](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/mutate-text) ·
+> [16 self-removal](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/mutate-removed) ·
+> [17 multi-type + debounce](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/mutate-multi)
 
 ### 13. Theme-class watcher
 
@@ -341,7 +389,10 @@ function onAdd(e: MutateEvent) {
 </template>
 ```
 
-`match` accepts a string or a `string[]`. Invalid selectors are silently skipped — valid sibling selectors still apply.
+`match` accepts a string or a `string[]`. An unparseable selector **throws at bind time**, naming
+the selector. It used to be swallowed per-selector, which meant a one-character typo left the mode
+permanently and silently dead — events built, filtered to empty, dropped — with absence as the
+consumer's only signal.
 
 ### 15. Live-validate `contenteditable` text
 
@@ -364,7 +415,15 @@ function onEdit(e: MutateEvent) {
 </template>
 ```
 
-Text mode subscribes with `subtree: true` so deep text-node edits fire too. Multiple character-data records in one MO batch collapse to a single `from` / latest `to`.
+`from` and `to` are the **host's whole `textContent`**, before and after the flush — not the
+content of whichever text node the browser happened to report. A `contenteditable` splits into
+several text nodes the first time the user presses Enter, and a per-node diff would pair the `from`
+of one node with the `to` of another; the validator above would start judging a single line.
+
+Text mode subscribes with `subtree: true` *and* `childList`, because `<div>{{ msg }}</div>` compiles
+to `el.textContent = …` — a childList mutation, and the most common way a Vue app changes text.
+Several records in one observer batch collapse to a single event with the original `from` and the
+latest `to`, and a batch that leaves the text identical emits nothing.
 
 ### 16. Self-removal cleanup
 
@@ -400,7 +459,13 @@ Self-removal attaches a second observer to `el.parentNode` (recorded at mount). 
 </template>
 ```
 
-Array form unions the subscription. `attr:*` plus a named `attr:foo` drops the filter — any attribute change fires.
+Array form unions the subscription. `attr:*` plus a named `attr:foo` drops the filter — any
+attribute change fires.
+
+`data-observe-state` is never reported, under `attr:*` or by name. The directive writes it, and
+`setAttribute` queues a MutationRecord even for an unchanged value, so reporting it would be the
+directive observing itself: flush → write → flush. Before 0.2.0 that was an unbounded microtask
+loop, i.e. a frozen tab with no stack and no error.
 
 ### 18. CSS-only mutate-active hook
 
@@ -454,7 +519,7 @@ type IntersectConfig = {
 type ResizeConfig = {
   on?:              'tick' | 'crossed' | 'orientation'  // default 'tick'
   breakpoints?:     number[] | Record<string, number>
-  axis?:            'width' | 'height' | 'both'         // default 'width'
+  axis?:            'width' | 'height' | 'both'         // default 'width'; also labels the segment
   squareTolerance?: number                              // default 0
   box?:             'border' | 'content' | 'device-pixel'  // default 'border'
   debounce?:        number                              // ms; 0 = off
@@ -469,8 +534,8 @@ type ResizeTickEvent = {
   from: ResizeDimensions | null     // null on the first tick
   to:   ResizeDimensions
   delta: ResizeDimensions           // {0,0} on the first tick
-  orientation: ResizeOrientation
-  bracket: string | null            // active label, or null when no breakpoints
+  orientation: ResizeOrientation | null   // null for a degenerate (0-width or 0-height) box
+  bracket: string | null            // active label on `axis`, or null when no breakpoints
 }
 
 type ResizeBracketEvent = {
@@ -478,14 +543,14 @@ type ResizeBracketEvent = {
   axis: 'width' | 'height'
   threshold: number
   direction: 'up' | 'down'
-  bracket: string                   // bracket label entered
-  from: ResizeDimensions | null
+  bracket: string                   // the bracket THIS crossing entered
+  from: ResizeDimensions            // never null — a crossing needs two measurements
   to:   ResizeDimensions
 }
 
 type ResizeOrientationEvent = {
   mode: 'orientation'
-  from: ResizeOrientation | null    // null until the second orientation
+  from: ResizeOrientation | null    // null on the first measurable orientation, then the previous one
   to:   ResizeOrientation
   ratio: number                     // width / height (0 when height === 0)
   dimensions: ResizeDimensions
@@ -530,16 +595,25 @@ type MutateEvent = {
 
 ### `data-observe-state` grammar
 
-```
+> [All three modes on one element](https://ozjsey.github.io/npm-portfolio-playground/#v-observe/combined) is the card to read this off: one binding, three
+> observers, and the attribute's three segments moving independently.
+
+```text
 intersect:<visible | hidden | ->;resize:<bracket | active | idle | ->;mutate:<active | idle | ->
 ```
 
-The `-` sentinel means **mode not configured on this binding**. Each segment is owned by its mode — writing one segment never clobbers the others.
+The `-` sentinel means **mode not configured on this binding** — nothing else. A configured mode
+whose observer global is missing is still configured, and reports the value it would report if
+nothing had happened yet.
+
+The attribute is only written when the string actually changes: a no-op `setAttribute` still queues
+a MutationRecord and still invalidates style.
 
 | Segment | Value | When |
 |---|---|---|
 | `intersect:visible` | when `isIntersecting === true` | observer callback |
 | `intersect:hidden`  | when `isIntersecting === false` | observer callback |
+| `intersect:visible` | when there is no `IntersectionObserver` on this engine | mounted — see below |
 | `resize:idle`       | initial value when configured | mounted |
 | `resize:active`     | tick mode without `breakpoints` | every callback |
 | `resize:<label>`    | bracket label | tick / crossed mode with `breakpoints` |
@@ -561,19 +635,53 @@ The `-` sentinel means **mode not configured on this binding**. Each segment is 
 
 ## Behavior
 
-- **First-tick semantics.** `ResizeObserver` fires once when an element is first observed. The first emitted event has `from: null` and `delta: { width: 0, height: 0 }`.
+- **First-tick semantics.** `ResizeObserver` fires once when an element is first observed. The
+  first emitted tick has `from: null` and `delta: { width: 0, height: 0 }`; in `on: 'orientation'`
+  it is an event with `from: null` and the orientation the element actually has, which is the only
+  signal an orientation consumer gets before the user resizes anything.
+- **No crossings on the first callback.** `intersect.crossed` and `resize` `on: 'crossed'` both
+  need a previous measurement to have crossed *from*. An element that mounts 60% visible has not
+  been scrolled in, and saying so would make an infinite-scroll sentinel load page 2 during mount.
 - **Reactive `cfg` swap.** Updating the binding swaps callbacks live without re-creating the observer. Changing the *shape* of `mutate.on` (e.g. `attr:class` → `removed`) triggers a host- and parent-observer rebuild; callback-only swaps stay in place.
 - **Mutate self-removal.** `on: 'removed'` attaches a second `MutationObserver` to `el.parentNode` (recorded at mount). It auto-disconnects after firing once. The host's main observer is **only** attached when at least one host-level signal (attr / children / text) is configured.
 - **Debounce coalescing.** Resize debounce keeps only the latest dimensions. Mutate debounce keeps the first `from` and the latest `to` for attr / text events; child-list events concatenate `added` / `removed`.
-- **`once: true` intersect.** Disconnects after the first `isIntersecting === true` callback. `crossed` events also stop — `once` is the explicit collapse signal.
+- **`once: true` intersect.** Disconnects after the first `isIntersecting === true` callback,
+  whether or not you passed an `on`. `crossed` stops too — `once` is the explicit collapse signal —
+  and the collapse survives re-renders, so `once` never degrades into "once per parent render".
+  It cannot be combined with `gateOnIntersect`; that throws at bind time (see Caveats).
 - **Empty breakpoints.** `breakpoints: []` and `breakpoints: {}` are equivalent to `breakpoints: undefined` — no bracket labels emitted, segment writes `'active'` in tick mode.
-- **SSR-safe.** No `window` / `document` / observer global access at module evaluation. If a required global is undefined at mount, that mode short-circuits — the state attribute still writes its initial sentinel.
+- **SSR-safe.** No `window` / `document` / observer global access at module evaluation. If a
+  required global is undefined at mount, that mode short-circuits and **every degradation fails
+  open**: the gate stops gating rather than swallowing every event, and the CSS hook reports
+  `intersect:visible` rather than `intersect:hidden`. Recipe 5 reveals content on
+  `[data-observe-state*='intersect:visible']`, so failing closed there meant a permanently invisible
+  page on any engine without an `IntersectionObserver`. Before 0.2.0 the two halves disagreed: the
+  gate failed open and the CSS hook failed closed.
 
 ## Caveats
 
 - **`gateOnIntersect` is "always fire" when `IntersectionObserver` is unavailable.** If the global is missing (older browsers / SSR / disabled), the gate becomes a no-op rather than silently swallowing every event for the directive's lifetime. Pair `gateOnIntersect: true` with a real `intersect` block — the validator throws if you forget.
-- **`match` invalid selectors silently drop.** Per-selector `try/catch` — invalid selectors do not throw at runtime; valid sibling selectors still match.
-- **`box: 'device-pixel'` fallback chain.** `devicePixelContentBoxSize` → `contentBoxSize × devicePixelRatio` → `contentRect`. The first available is read at each callback.
+- **An unparseable `match` selector throws at bind time**, naming the selector, rather than
+  quietly filtering every child out.
+- **`once` and `gateOnIntersect` cannot be combined**, and the pair throws at bind time. `once`
+  disconnects the observer after the first visible tick, and a gate with no live observer stops
+  gating — so the combination used to suppress work until the element was first seen and then never
+  again, including once it had scrolled far off-screen.
+- **A restored gate re-observes.** Resize observations are delivered before intersection ones, so
+  with `gateOnIntersect: true` the mandatory first `ResizeObserver` callback is always dropped —
+  and a real `ResizeObserver` does not re-send it for a box that has not changed. On the
+  hidden → visible flip the element is re-observed, so the first call after restore carries a fresh
+  measurement instead of never arriving.
+- **A 0x0 box has no orientation.** A `display: none` element reports `0 × 0`, which is not square,
+  it is unmeasured. `ResizeTickEvent.orientation` is `null` there, `on: 'orientation'` emits
+  nothing, and the `resize:` segment keeps its previous value — so hiding and showing a panel no
+  longer flickers through a phantom `square`.
+- **`box: 'device-pixel'` fallback chain.** `devicePixelContentBoxSize` →
+  `contentBoxSize × devicePixelRatio` → `contentRect`. The first available is read at each callback.
+  The *observation* falls back to `content-box` on engines that reject `device-pixel-content-box`.
+- **`thresholds` outside `[0, 1]` throw at bind time**, with a message naming this library.
+  `IntersectionObserver`'s own `RangeError` does not mention it, and the option's value is usually
+  consumer-supplied.
 - **`(base)` bracket label.** Object-form breakpoints without a `0` key use `(base)` as the smallest-bracket label. Provide an explicit `0` key (e.g. `{ xs: 0, sm: 320, … }`) to take ownership of that label.
 - **Direction inference is null on intermediate ticks.** `IntersectEvent.direction` is only set on visibility transitions; mid-scroll ticks where `isIntersecting` didn't flip return `null`.
 - **`mutate.on: 'removed'` bypasses `gateOnIntersect`.** The `removed` event is terminal — if it were gated, you might never see it (the element is detached, so `IntersectionObserver` may report stale state). It always fires through the parent observer regardless of visibility.

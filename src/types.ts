@@ -43,19 +43,33 @@ export type IntersectEvent = {
 export type IntersectConfig = {
   /** Fires on every observer callback. */
   on?: (event: IntersectEvent) => void
-  /** Auto-disconnect after the first `isIntersecting === true` callback. */
+  /**
+   * Collapse to a single visible tick: after the first callback with
+   * `isIntersecting === true` the observer is disconnected, so neither `on`
+   * nor `crossed` fires again — and it stays collapsed across re-renders.
+   * Incompatible with `gateOnIntersect`, which needs a live observer; that
+   * combination throws at bind time.
+   */
   once?: boolean
   /**
    * Threshold values forwarded to the underlying `IntersectionObserver`.
    * The directive also fires the per-threshold `crossed` event on each
-   * crossing in the appropriate direction.
+   * crossing in the appropriate direction. Values outside `[0, 1]` throw at
+   * bind time. Changing this rebuilds the observer.
    */
   thresholds?: number[]
-  /** Fires once per threshold per crossing. */
+  /**
+   * Fires once per threshold per crossing. No crossings are emitted for the
+   * first callback: a crossing needs a previous ratio to have crossed *from*.
+   */
   crossed?: (event: IntersectCrossEvent) => void
-  /** Forwarded to `IntersectionObserverInit.root`. */
+  /**
+   * Forwarded to `IntersectionObserverInit.root`. Reactive: assigning a
+   * different element (for instance a template ref that only resolves after
+   * the first render) rebuilds the observer against the new root.
+   */
   root?: Element | Document | null
-  /** Forwarded to `IntersectionObserverInit.rootMargin`. */
+  /** Forwarded to `IntersectionObserverInit.rootMargin`. Reactive — see `root`. */
   rootMargin?: string
 }
 
@@ -77,9 +91,12 @@ export type ResizeBracketEvent = {
   axis: 'width' | 'height'
   threshold: number
   direction: 'up' | 'down'
-  /** Resolved label of the bracket the dimension is now in. */
+  /** Label of the bracket entered by crossing THIS threshold. On a jump over
+   *  several thresholds each event carries the bracket it entered, not the
+   *  final one. */
   bracket: string
-  from: ResizeDimensions | null
+  /** The previous dimensions. Never null: a crossing needs two measurements. */
+  from: ResizeDimensions
   to: ResizeDimensions
 }
 
@@ -90,14 +107,18 @@ export type ResizeTickEvent = {
   to: ResizeDimensions
   /** to - from componentwise. `{0,0}` on the first tick (from === null). */
   delta: ResizeDimensions
-  orientation: ResizeOrientation
-  /** Active bracket label when `breakpoints` configured, else null. */
+  /** `null` for a degenerate (0-width or 0-height) box — a hidden element has
+   *  no orientation, and reporting one would be an invented measurement. */
+  orientation: ResizeOrientation | null
+  /** Active bracket label on the `axis` in use, or null with no `breakpoints`. */
   bracket: string | null
 }
 
-/** Fires only on portrait↔landscape (or ↔square) flips when `on: 'orientation'`. */
+/** Fires when `on: 'orientation'`: once with `from: null` for the first
+ *  measurable orientation, then on every portrait ↔ landscape ↔ square flip. */
 export type ResizeOrientationEvent = {
   mode: 'orientation'
+  /** `null` on the initial event — there was no previous orientation. */
   from: ResizeOrientation | null
   to: ResizeOrientation
   /** Aspect ratio width / height. */
@@ -112,7 +133,7 @@ export type ResizeConfig = {
    * Dispatch mode:
    * - `'tick'` (default) — handler fires on every observer callback with `ResizeTickEvent`.
    * - `'crossed'` — handler fires only on bracket crossings with `ResizeBracketEvent` (requires `breakpoints`).
-   * - `'orientation'` — handler fires only on orientation flips with `ResizeOrientationEvent`.
+   * - `'orientation'` — handler fires on the first measurable orientation and on every flip after it.
    */
   on?: ResizeMode
   /**
@@ -122,22 +143,41 @@ export type ResizeConfig = {
    * a key with value `0` is explicitly provided.
    */
   breakpoints?: number[] | Record<string, number>
-  /** Axis filter for `crossed` events. Default `'width'`. */
+  /**
+   * Which dimension the brackets are measured on. Default `'width'`. Also
+   * decides the axis behind `ResizeTickEvent.bracket` and the `resize:` state
+   * segment; `'both'` emits crossings for each axis and labels on width.
+   */
   axis?: 'width' | 'height' | 'both'
   /** Half-width of the square band as a fraction of the larger dimension. Default `0`. */
   squareTolerance?: number
-  /** Which ResizeObserverEntry box to read. Default `'border'`. */
+  /**
+   * Which box to observe and report. Default `'border'`. This is passed to
+   * `ResizeObserver.observe`, so it decides *when a callback fires* as well as
+   * what the dimensions mean: `'border'` sees a border/padding-only change,
+   * `'device-pixel'` sees a devicePixelRatio change that leaves layout alone.
+   * Changing it re-observes the element.
+   */
   box?: ResizeBox
-  /** Coalesces tick storms into one call per window (ms). */
+  /**
+   * Trailing-edge debounce (ms). The handler fires once the callbacks stop for
+   * this long, with the latest dimensions — a continuous drag produces no call
+   * until it ends.
+   */
   debounce?: number
-  /** Gate handler behind `intersect` visibility — wired in a follow-up run. */
+  /**
+   * Suppress the handler while `intersect` reports the host hidden. On the
+   * hidden → visible flip the element is re-observed, so the first call after
+   * restore carries a fresh measurement rather than a stale baseline. Requires
+   * an `intersect` config without `once` — both are checked at bind time.
+   */
   gateOnIntersect?: boolean
   /** Subscriber. Receives a discriminated union — narrow via `event.mode`. */
   handler?: (event: ResizeEvent) => void
 }
 
 /* ------------------------------------------------------------------ */
-/*  Public types — Mutate (P0 stubs)                                   */
+/*  Public types — Mutate                                              */
 /* ------------------------------------------------------------------ */
 
 export type MutateEventType =
@@ -151,18 +191,30 @@ export type MutateEventType =
 
 export type MutateEvent<T extends HTMLElement = HTMLElement> = {
   type: MutateEventType
+  /** Attribute name, on `attr:` events. */
   name?: string
+  /** Previous value — the attribute's, or the host's whole `textContent`. */
   from?: string | null
+  /** Current value — the attribute's, or the host's whole `textContent`. */
   to?: string | null
   added?: T[]
   removed?: T[]
+  /** The directive host. */
   target: HTMLElement
 }
 
 export type MutateConfig<T extends HTMLElement = HTMLElement> = {
   on?: MutateEventType | MutateEventType[]
+  /** Selector(s) filtering `children:added` / `children:removed`. An invalid
+   *  selector throws at bind time rather than silently matching nothing. */
   match?: string | string[]
+  /** Trailing-edge debounce (ms). Events merge per type inside the window. */
   debounce?: number
+  /**
+   * Suppress the handler while `intersect` reports the host hidden. Mutations
+   * that happen while hidden are dropped, not replayed. `on: 'removed'` is
+   * never gated. Requires an `intersect` config without `once`.
+   */
   gateOnIntersect?: boolean
   handler?: (event: MutateEvent<T>) => void
 }
@@ -182,7 +234,10 @@ export type ObserveOptions = {
  * resize segment is open-ended (`string`) because it carries the matched
  * breakpoint label which is consumer-defined. Each segment is `"-"` when the
  * corresponding mode is not configured on this binding.
+ *
+ * This is the writer's own return type — `observeStateAttribute()` in
+ * `state-attribute.ts` is declared to return it, so the grammar and the
+ * string that reaches the DOM cannot drift apart.
  */
 export type ObserveStateAttribute =
   `intersect:${'visible' | 'hidden' | '-'};resize:${string};mutate:${'active' | 'idle' | '-'}`
-

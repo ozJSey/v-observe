@@ -1,75 +1,61 @@
 /**
- * The directive — lifecycle wiring only. Validates the option shape, then
- * delegates each configured mode to its own module; `updated` diffs mode
- * presence (setup / cfg-swap / teardown) and keeps the state attribute's
- * segments truthful.
+ * The directive — lifecycle wiring only.
+ *
+ * `mounted` and `updated` run the SAME function. There is no separate
+ * "swap the cfg" path here: each mode's `setup*` already decides whether the
+ * call is a first wiring, a cheap cfg swap, or a rebuild, because only that
+ * module knows which of its options can be changed on a live observer. This
+ * file used to re-implement two of the three swaps and skip the third, so a
+ * fix added to a setup function applied on mount and silently did nothing on
+ * a binding update.
+ *
+ * The only thing this file owns is `state.configured` — which modes THIS
+ * binding asks for, which is what makes a `data-observe-state` segment `'-'`.
  */
-import type { Directive, DirectiveBinding } from 'vue'
-import { validateOptions } from './gate'
+import type { DirectiveBinding, ObjectDirective } from 'vue'
 import { setupIntersect, teardownIntersect } from './intersect'
 import { setupMutate, teardownMutate } from './mutate'
-import { normalizeBreakpoints, setupResize, teardownResize } from './resize'
+import { setupResize, teardownResize } from './resize'
 import { getOrCreate, stateMap } from './state'
-import { writeStateAttribute } from './state-attribute'
+import { STATE_ATTRIBUTE, writeStateAttribute } from './state-attribute'
 import type { ObserveOptions } from './types'
+import { validateOptions } from './validate'
 
-function resolveBinding(value: ObserveOptions | undefined): ObserveOptions {
-  return value ?? {}
+function apply(el: HTMLElement, opts: ObserveOptions): void {
+  validateOptions(opts)
+  const state = getOrCreate(el)
+
+  // Set before any setup runs: a mode that cannot wire up (missing global)
+  // is still configured, and the segment must say so.
+  state.configured.intersect = opts.intersect !== undefined
+  state.configured.resize = opts.resize !== undefined
+  state.configured.mutate = opts.mutate !== undefined
+
+  if (opts.intersect) setupIntersect(el, opts.intersect, state)
+  else teardownIntersect(el)
+
+  if (opts.resize) setupResize(el, opts.resize, state)
+  else teardownResize(el)
+
+  if (opts.mutate) setupMutate(el, opts.mutate, state)
+  else teardownMutate(el)
+
+  writeStateAttribute(el, state)
 }
 
-export const vObserve: Directive<HTMLElement, ObserveOptions | undefined> = {
+/**
+ * Declared as `ObjectDirective`, not `Directive`. `Directive` is a union with
+ * the function-shorthand form, so `vObserve.mounted` does not typecheck for a
+ * consumer (or a test) holding the exported object — which is how this
+ * package's own suite ended up excluded from `tsc` entirely.
+ */
+export const vObserve: ObjectDirective<HTMLElement, ObserveOptions | undefined> = {
   mounted(el: HTMLElement, binding: DirectiveBinding<ObserveOptions | undefined>) {
-    const opts = resolveBinding(binding.value)
-    validateOptions(opts)
-    const state = getOrCreate(el, opts)
-    writeStateAttribute(el, state.segments)
-    if (opts.intersect) {
-      setupIntersect(el, opts.intersect, opts)
-    }
-    if (opts.resize) {
-      setupResize(el, opts.resize, opts)
-    }
-    if (opts.mutate) {
-      setupMutate(el, opts.mutate, opts)
-    }
+    apply(el, binding.value ?? {})
   },
 
   updated(el: HTMLElement, binding: DirectiveBinding<ObserveOptions | undefined>) {
-    const next = resolveBinding(binding.value)
-    validateOptions(next)
-    const state = stateMap.get(el)
-
-    if (next.intersect) {
-      if (state?.intersect) {
-        state.intersect.cfg = next.intersect
-      } else {
-        setupIntersect(el, next.intersect, next)
-      }
-    } else if (state?.intersect) {
-      teardownIntersect(el)
-      if (state) state.segments.intersect = '-'
-    }
-
-    if (next.resize) {
-      if (state?.resize) {
-        state.resize.cfg = next.resize
-        state.resize.normalized = normalizeBreakpoints(next.resize.breakpoints)
-      } else {
-        setupResize(el, next.resize, next)
-      }
-    } else if (state?.resize) {
-      teardownResize(el)
-      if (state) state.segments.resize = '-'
-    }
-
-    if (next.mutate) {
-      setupMutate(el, next.mutate, next)
-    } else if (state?.mutate) {
-      teardownMutate(el)
-      if (state) state.segments.mutate = '-'
-    }
-
-    if (state) writeStateAttribute(el, state.segments)
+    apply(el, binding.value ?? {})
   },
 
   unmounted(el: HTMLElement) {
@@ -77,7 +63,7 @@ export const vObserve: Directive<HTMLElement, ObserveOptions | undefined> = {
     teardownResize(el)
     teardownMutate(el)
     stateMap.delete(el)
-    el.removeAttribute('data-observe-state')
+    el.removeAttribute(STATE_ATTRIBUTE)
   },
 }
 
