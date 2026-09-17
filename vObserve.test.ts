@@ -2480,6 +2480,151 @@ describe('mutate: diff payload', () => {
 })
 
 /* ------------------------------------------------------------------ */
+/*  Tests — Mutate: children:added vs children:removed                  */
+/*                                                                      */
+/*  `childList: true` in the observer init is what EITHER subscription   */
+/*  needs, so the browser hands the directive both directions no matter  */
+/*  which one the consumer asked for. Separating them is therefore a     */
+/*  DELIVERY-time filter, and these are the tests that watch it: each    */
+/*  fires the direction that was not subscribed and asserts silence.     */
+/*  Until 0.2.1 both types collapsed into one `childList` flag and every  */
+/*  one-sided subscriber got the other half too.                        */
+/* ------------------------------------------------------------------ */
+
+describe('mutate: children:added vs children:removed', () => {
+  it('children:added only — a removal is NOT delivered', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: 'children:added', handler: (e) => events.push(e) },
+    })
+    // The init stays correct: one flag covers both directions, by design.
+    const init = (moByElement.get(host)![0] as unknown as MockMutationObserver).observed.get(host)
+    expect(init?.childList).toBe(true)
+
+    const gone = document.createElement('li')
+    fireMutation(host, { type: 'childList', target: host, removedNodes: [gone] })
+
+    expect(events).toEqual([])
+    unmount()
+  })
+
+  it('children:removed only — an addition is NOT delivered', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: 'children:removed', handler: (e) => events.push(e) },
+    })
+    const init = (moByElement.get(host)![0] as unknown as MockMutationObserver).observed.get(host)
+    expect(init?.childList).toBe(true)
+
+    const fresh = document.createElement('li')
+    fireMutation(host, { type: 'childList', target: host, addedNodes: [fresh] })
+
+    expect(events).toEqual([])
+    unmount()
+  })
+
+  it('children:added only — one record carrying both directions delivers the addition alone', () => {
+    // `el.replaceChildren(next)` is a single record with addedNodes AND
+    // removedNodes, so the two halves cannot be told apart by record.
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: 'children:added', handler: (e) => events.push(e) },
+    })
+    const gone = document.createElement('li')
+    const fresh = document.createElement('li')
+    fireMutation(host, {
+      type: 'childList',
+      target: host,
+      addedNodes: [fresh],
+      removedNodes: [gone],
+    })
+
+    expect(events.map((e) => e.type)).toEqual(['children:added'])
+    expect(events[0].added).toEqual([fresh])
+    expect(events[0].removed).toBeUndefined()
+    unmount()
+  })
+
+  it('children:removed only — one record carrying both directions delivers the removal alone', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: 'children:removed', handler: (e) => events.push(e) },
+    })
+    const gone = document.createElement('li')
+    const fresh = document.createElement('li')
+    fireMutation(host, {
+      type: 'childList',
+      target: host,
+      addedNodes: [fresh],
+      removedNodes: [gone],
+    })
+
+    expect(events.map((e) => e.type)).toEqual(['children:removed'])
+    expect(events[0].removed).toEqual([gone])
+    expect(events[0].added).toBeUndefined()
+    unmount()
+  })
+
+  it('both subscribed — payloads and data-observe-state are unchanged', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: ['children:added', 'children:removed'], handler: (e) => events.push(e) },
+    })
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:-;mutate:idle')
+
+    const gone = document.createElement('li')
+    const fresh = document.createElement('li')
+    fireMutation(host, {
+      type: 'childList',
+      target: host,
+      addedNodes: [fresh],
+      removedNodes: [gone],
+    })
+
+    expect(events.map((e) => e.type)).toEqual(['children:added', 'children:removed'])
+    expect(Object.keys(events[0]).sort()).toEqual(['added', 'target', 'type'])
+    expect(Object.keys(events[1]).sort()).toEqual(['removed', 'target', 'type'])
+    expect(events[0].added).toEqual([fresh])
+    expect(events[0].target).toBe(host)
+    expect(events[1].removed).toEqual([gone])
+    expect(events[1].target).toBe(host)
+    expect(host.getAttribute('data-observe-state')).toBe('intersect:-;resize:-;mutate:active')
+    unmount()
+  })
+
+  it('children:added only, debounced — the removal never reaches the flush', () => {
+    vi.useFakeTimers()
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: 'children:added', debounce: 100, handler: (e) => events.push(e) },
+    })
+    const fresh = document.createElement('li')
+    const gone = document.createElement('li')
+    fireMutation(host, { type: 'childList', target: host, addedNodes: [fresh] })
+    fireMutation(host, { type: 'childList', target: host, removedNodes: [gone] })
+    vi.advanceTimersByTime(100)
+
+    expect(events.map((e) => e.type)).toEqual(['children:added'])
+    expect(events[0].added).toEqual([fresh])
+    unmount()
+    vi.useRealTimers()
+  })
+
+  it('match filters the subscribed direction only — an unsubscribed match is still silent', () => {
+    const events: MutateEvent[] = []
+    const { host, unmount } = mount({
+      mutate: { on: 'children:added', match: '.item', handler: (e) => events.push(e) },
+    })
+    const goneItem = document.createElement('li')
+    goneItem.className = 'item'
+    fireMutation(host, { type: 'childList', target: host, removedNodes: [goneItem] })
+
+    expect(events).toEqual([])
+    unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ */
 /*  Tests — Mutate: self-removal detection                              */
 /* ------------------------------------------------------------------ */
 
@@ -4330,6 +4475,32 @@ describe('mutate: against a real MutationObserver', () => {
     expect(events.map((e) => e.type)).toEqual(['children:added', 'children:removed'])
     expect(events[0].added).toEqual([child])
     expect(events[1].removed).toEqual([child])
+    unmount()
+  })
+
+  it('real children:added only — a real removal is not delivered', async () => {
+    const { host, events, unmount } = mountWatched({ mutate: { on: 'children:added' } })
+    const child = document.createElement('span')
+    host.appendChild(child)
+    await new Promise((r) => setTimeout(r, 50))
+    child.remove()
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(events.map((e) => e.type)).toEqual(['children:added'])
+    expect(events[0].added).toEqual([child])
+    unmount()
+  })
+
+  it('real children:removed only — a real addition is not delivered', async () => {
+    const { host, events, unmount } = mountWatched({ mutate: { on: 'children:removed' } })
+    const child = document.createElement('span')
+    host.appendChild(child)
+    await new Promise((r) => setTimeout(r, 50))
+    child.remove()
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(events.map((e) => e.type)).toEqual(['children:removed'])
+    expect(events[0].removed).toEqual([child])
     unmount()
   })
 

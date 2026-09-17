@@ -3,7 +3,7 @@
  * builders, and the MutationRecord → semantic-event translation. No state,
  * no observers: everything here is a pure function over its inputs.
  *
- * Two rules this file exists to keep honest:
+ * Three rules this file exists to keep honest:
  *
  * - `text` is a diff of the HOST's `textContent`, never of one text node.
  *   The browser reports characterData per node, and a host with several text
@@ -14,6 +14,11 @@
  *   Vue app changes text.
  * - `data-observe-state` is never reported. The directive writes it, so
  *   feeding it back as an `attr:` event is the directive observing itself.
+ * - `children:added` and `children:removed` are separated at DELIVERY, not at
+ *   subscription. `childList: true` is a single init flag covering both
+ *   directions — the browser cannot subscribe to half of it — so the two
+ *   subscriptions are remembered apart (`childrenAdded` / `childrenRemoved`)
+ *   and `recordsToEvents` collects only the direction that was asked for.
  */
 import type { NormalizedMutateConfig } from './state'
 import { STATE_ATTRIBUTE } from './state-attribute'
@@ -24,7 +29,8 @@ export function normalizeMutate(cfg: MutateConfig): NormalizedMutateConfig {
   const types = on === undefined ? [] : Array.isArray(on) ? on : [on]
   const attrNames = new Set<string>()
   let attrAny = false
-  let childList = false
+  let childrenAdded = false
+  let childrenRemoved = false
   let text = false
   let removed = false
   for (const t of types) {
@@ -35,8 +41,10 @@ export function normalizeMutate(cfg: MutateConfig): NormalizedMutateConfig {
       // feedback loop; it is dropped rather than honoured.
       const name = t.slice(5)
       if (name !== STATE_ATTRIBUTE) attrNames.add(name)
-    } else if (t === 'children:added' || t === 'children:removed') {
-      childList = true
+    } else if (t === 'children:added') {
+      childrenAdded = true
+    } else if (t === 'children:removed') {
+      childrenRemoved = true
     } else if (t === 'text') {
       text = true
     } else if (t === 'removed') {
@@ -46,7 +54,15 @@ export function normalizeMutate(cfg: MutateConfig): NormalizedMutateConfig {
   const matches = cfg.match
     ? Array.isArray(cfg.match) ? cfg.match.slice() : [cfg.match]
     : null
-  return { attrNames, attrAny, childList, text, removed, matches }
+  return { attrNames, attrAny, childrenAdded, childrenRemoved, text, removed, matches }
+}
+
+/** One init flag serves both children subscriptions: `childList: true` reports
+ *  additions and removals together, and there is no way to ask for one. The
+ *  direction the consumer actually asked for is filtered at delivery, in
+ *  `recordsToEvents`. */
+function subscribesChildList(norm: NormalizedMutateConfig): boolean {
+  return norm.childrenAdded || norm.childrenRemoved
 }
 
 export function buildMutateInit(norm: NormalizedMutateConfig): MutationObserverInit {
@@ -62,7 +78,7 @@ export function buildMutateInit(norm: NormalizedMutateConfig): MutationObserverI
   // `text` needs childList as well: setting `el.textContent` replaces the text
   // node rather than editing it, and that is what a Vue text interpolation
   // compiles to.
-  if (norm.childList || norm.text) {
+  if (subscribesChildList(norm) || norm.text) {
     init.childList = true
   }
   if (norm.text) {
@@ -73,11 +89,15 @@ export function buildMutateInit(norm: NormalizedMutateConfig): MutationObserverI
   return init
 }
 
+/** Identity of the OBSERVER, not of the subscription: swapping
+ *  `children:added` for `children:removed` leaves the init identical, so it
+ *  must not rebuild the observer. The new normalized config is installed
+ *  either way, and that is what the delivery filter reads. */
 export function buildMutateInitKey(norm: NormalizedMutateConfig): string {
   const attrPart = norm.attrAny
     ? '*'
     : Array.from(norm.attrNames).sort().join(',')
-  return `a:${attrPart}|c:${norm.childList ? 1 : 0}|t:${norm.text ? 1 : 0}|r:${norm.removed ? 1 : 0}`
+  return `a:${attrPart}|c:${subscribesChildList(norm) ? 1 : 0}|t:${norm.text ? 1 : 0}|r:${norm.removed ? 1 : 0}`
 }
 
 export function initHasAnyHostSignal(init: MutationObserverInit): boolean {
@@ -143,10 +163,19 @@ export function recordsToEvents(
       // Any childList record can have changed the host's text, including one
       // on a descendant (`subtree` is on when `text` is subscribed).
       sawTextSignal = true
-      if (!norm.childList) continue
       if (r.target !== el) continue
-      for (const node of filterElementNodes(Array.from(r.addedNodes))) added.push(node)
-      for (const node of filterElementNodes(Array.from(r.removedNodes))) removed.push(node)
+      // The delivery filter, and its only site: the record carries both
+      // directions because the init cannot ask for one, so a consumer who
+      // subscribed to `children:added` must not be handed the removals — and
+      // one record can carry both (`el.replaceChildren(next)`). Everything
+      // below builds events from these two arrays, so filtering as they are
+      // filled is what keeps the subscription out of the event builders.
+      if (norm.childrenAdded) {
+        for (const node of filterElementNodes(Array.from(r.addedNodes))) added.push(node)
+      }
+      if (norm.childrenRemoved) {
+        for (const node of filterElementNodes(Array.from(r.removedNodes))) removed.push(node)
+      }
     } else if (r.type === 'characterData') {
       sawTextSignal = true
     }

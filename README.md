@@ -643,6 +643,11 @@ a MutationRecord and still invalidates style.
   need a previous measurement to have crossed *from*. An element that mounts 60% visible has not
   been scrolled in, and saying so would make an infinite-scroll sentinel load page 2 during mount.
 - **Reactive `cfg` swap.** Updating the binding swaps callbacks live without re-creating the observer. Changing the *shape* of `mutate.on` (e.g. `attr:class` → `removed`) triggers a host- and parent-observer rebuild; callback-only swaps stay in place.
+- **`children:added` and `children:removed` are separate subscriptions.** One `childList: true` init
+  serves both — the browser has no way to watch a single direction — so the directive filters at
+  delivery: `on: 'children:added'` never reports a removal, and a single record that does both at
+  once (`el.replaceChildren(next)`) delivers only the half you subscribed to. Before 0.2.1 either
+  type delivered both, with the other direction's payload. Subscribing to both is unchanged.
 - **Mutate self-removal.** `on: 'removed'` attaches a second `MutationObserver` to `el.parentNode` (recorded at mount). It auto-disconnects after firing once. The host's main observer is **only** attached when at least one host-level signal (attr / children / text) is configured.
 - **Debounce coalescing.** Resize debounce keeps only the latest dimensions. Mutate debounce keeps the first `from` and the latest `to` for attr / text events; child-list events concatenate `added` / `removed`.
 - **`once: true` intersect.** Disconnects after the first `isIntersecting === true` callback,

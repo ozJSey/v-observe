@@ -88,8 +88,13 @@ export interface NormalizedMutateConfig {
   attrNames: Set<string>
   /** When true, attributes are observed without a filter (any attribute change fires). */
   attrAny: boolean
-  /** Subscribed to children:added or children:removed. */
-  childList: boolean
+  /** Subscribed to `children:added`. Kept apart from `childrenRemoved`
+   *  because `childList: true` is one init flag covering both directions:
+   *  these two fields are the only record of which the consumer asked for,
+   *  and `recordsToEvents` filters the delivery with them. */
+  childrenAdded: boolean
+  /** Subscribed to `children:removed`. See `childrenAdded`. */
+  childrenRemoved: boolean
   /** Subscribed to text. */
   text: boolean
   /** Subscribed to self-removal. */

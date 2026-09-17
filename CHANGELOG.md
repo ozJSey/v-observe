@@ -13,8 +13,33 @@ a real Chrome through the playground's `v-observe` tab; see
 
 ## [0.2.1] — 2026-09-17
 
-Documentation only; no code change. Two release-state claims in the 0.2.0 tarball corrected against
-`registry.npmjs.org`, which is the only source either was ever checkable against:
+### Fixed
+
+- **`children:added` and `children:removed` delivered each other's events.** Subscribing to one of
+  the two was a subscription to both: `on: 'children:added'` fired on every removal and
+  `on: 'children:removed'` fired on every addition, each carrying the other direction's payload —
+  so a handler reading `event.added` found it `undefined` on half of its calls. Both types
+  normalized to a single `childList` flag, and `childList: true` is what the observer init needs
+  for *either* of them, so which one the consumer had actually asked for was recorded nowhere. The
+  two subscriptions are now remembered apart and the direction is filtered where the events are
+  built, in one place: `on: 'children:added'` never reports a removal, and a single record that
+  does both at once (`el.replaceChildren(next)`) delivers only the half you subscribed to. A
+  consumer subscribed to **both** — the shape every playground demo and every README recipe uses —
+  sees no change: the same two events, the same payloads, the same `data-observe-state`. The
+  observer init is unchanged too, so swapping `children:added` for `children:removed` on a live
+  binding still does not rebuild the observer.
+
+  241 tests passed with this in the tree, because every children test fired the direction it had
+  subscribed to. The nine added tests fire the direction that was *not* subscribed and assert
+  silence — six against the mocked observer (including through the `debounce` window and the
+  `match` filter), two driving a real `MutationObserver` over a real `appendChild` / `remove`, and
+  one pinning the both-subscribed payloads and the state attribute so the default path is watched
+  as well.
+
+### Fixed — release-state claims in the 0.2.0 tarball
+
+Two claims corrected against `registry.npmjs.org`, which is the only source either was ever
+checkable against:
 
 > **"`0.1.0` was never published."** The registry has held `@ozjsey/v-observe@0.1.0` since
 > 2026-09-13T13:52:52Z, and it is still installable. Anyone who ran `npm i @ozjsey/v-observe` that

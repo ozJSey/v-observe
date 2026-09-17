@@ -54,6 +54,14 @@ interact are separate modules by design: `gate.ts` (suppression + restore) and `
 (the shared attribute). If you find yourself importing one mode from another, that interaction
 belongs in one of those two.
 
+**A children subscription is filtered at delivery, and the `added` / `removed` arrays have exactly
+one writer.** *Enforced by locality.* `childList: true` is a single init flag covering both
+directions, so the init cannot separate `children:added` from `children:removed` — only
+`recordsToEvents` can, and the filter lives at the one place the two arrays are appended to. The
+event builders below it read the arrays and know nothing about the subscription, so a new children
+event cannot reintroduce a second copy of the check. This is what collapsing both types into one
+`childList` flag cost until 0.2.1: every one-sided subscriber received the other half too.
+
 **Bad options fail where they were written.** `validate.ts` runs first in `mounted` and `updated`.
 It rejects the combinations whose alternative is a silent death: `once` + `gateOnIntersect` (a gate
 with no live observer stops gating), a threshold outside `[0, 1]` (the constructor throws with a
