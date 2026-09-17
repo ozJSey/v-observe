@@ -11,11 +11,27 @@ each one was negative-controlled, not just written. The entries that jsdom canno
 a real Chrome through the playground's `v-observe` tab; see
 `playground/scripts/interactions/v-observe.mjs`.
 
-## [0.2.0] — 2026-09-13
+## [0.2.1] — 2026-09-17
 
-The package's first audit, and its first browser spec. `0.1.0` was never published; if you vendored
-it, the four items under "the ones that made the feature useless" are the reason your copy behaves
-oddly.
+Documentation only; no code change. Two release-state claims in the 0.2.0 tarball corrected against
+`registry.npmjs.org`, which is the only source either was ever checkable against:
+
+> **"`0.1.0` was never published."** The registry has held `@ozjsey/v-observe@0.1.0` since
+> 2026-09-13T13:52:52Z, and it is still installable. Anyone who ran `npm i @ozjsey/v-observe` that
+> day and then read the 0.2.0 changelog was told they had imagined it.
+
+> **"[0.2.0] — 2026-09-13."** 0.2.0 went up at 2026-09-14T10:06:06Z. The date was the day the work
+> was done, typed before the publish and never revisited — the same habit behind the line above.
+
+`scripts/publish.mjs` now refuses a tarball whose packed docs deny the release state of the version
+being published (DOC-1).
+
+## [0.2.0] — 2026-09-14
+
+The package's first audit, and its first browser spec. Published to npm at 2026-09-14T10:06:06Z.
+
+**If you are on `0.1.0`** — published 2026-09-13T13:52:52Z, and still installable — the four items
+under "the ones that made the feature useless" are the reason it behaves oddly.
 
 ### Fixed — the ones that made the feature useless
 
