@@ -1,7 +1,7 @@
 {
   "name": "@ozjsey/v-observe",
-  "version": "0.2.1",
-  "description": "Vue 3 directive owning IntersectionObserver + ResizeObserver + MutationObserver in one binding — cross-observer gating, threshold-crossed events, diff payloads, unified state attribute",
+  "version": "0.2.2",
+  "description": "Vue 3 directive owning IntersectionObserver + ResizeObserver + MutationObserver in one binding \u2014 cross-observer gating, threshold-crossed events, diff payloads, unified state attribute",
   "author": "Ozgur Seyidoglu",
   "license": "MIT",
   "repository": {

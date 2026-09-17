@@ -11,6 +11,13 @@ each one was negative-controlled, not just written. The entries that jsdom canno
 a real Chrome through the playground's `v-observe` tab; see
 `playground/scripts/interactions/v-observe.mjs`.
 
+## 0.2.2 — 2026-09-18
+
+Documentation only; no code change. The README is cut to a landing page — problem, solution,
+install, a couple of usage examples — because the playground now carries the reference: every
+option driven in a real browser rather than described in a table. Claims that could not be
+verified against the source were deleted rather than carried across.
+
 ## [0.2.1] — 2026-09-17
 
 ### Fixed
