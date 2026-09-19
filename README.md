@@ -3,7 +3,10 @@
 **`IntersectionObserver` + `ResizeObserver` + `MutationObserver` in one Vue 3 binding**, with the
 diffs, thresholds and debounces you would otherwise write by hand.
 
-[![npm](https://img.shields.io/npm/v/@ozjsey/v-observe)](https://www.npmjs.com/package/@ozjsey/v-observe)
+[![npm](https://img.shields.io/npm/v/@ozjsey/v-observe.svg)](https://www.npmjs.com/package/@ozjsey/v-observe)
+![license MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![gzipped 4.58 KiB](https://img.shields.io/badge/gzipped-4.58%20KiB-blue.svg)
+![dependencies 0](https://img.shields.io/badge/dependencies-0-blue.svg)
 
 ## The problem
 
